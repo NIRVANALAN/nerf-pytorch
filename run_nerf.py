@@ -226,17 +226,26 @@ def render_path(
     return rgbs, disps
 
 
-def create_nerf(args):
+def create_model(args):
     """Instantiate NeRF's MLP model."""
+    model_dict = {"nerf": NeRF, "resnetFC": ResnetFC}
+    if args.arch not in model_dict:
+        raise NotImplementedError(
+            "no {} architecture found. Please select in {}".format(
+                args.arch, model_dict.keys()
+            )
+        )
+
+    nerf_net = model_dict[args.arch]
     embed_fn, input_ch = get_embedder(args.multires, args.i_embed)
 
     input_ch_views = 0
     embeddirs_fn = None
     if args.use_viewdirs:
         embeddirs_fn, input_ch_views = get_embedder(args.multires_views, args.i_embed)
-    output_ch = 5 if args.N_importance > 0 else 4
+    output_ch = 5 if args.N_importance > 0 else 4  # *
     skips = [4]
-    model = NeRF(
+    model = nerf_net(
         D=args.netdepth,
         W=args.netwidth,
         input_ch=input_ch,
@@ -245,11 +254,14 @@ def create_nerf(args):
         input_ch_views=input_ch_views,
         use_viewdirs=args.use_viewdirs,
     ).to(device)
+
+    print(model)
+
     grad_vars = list(model.parameters())
 
     model_fine = None
     if args.N_importance > 0:
-        model_fine = NeRF(
+        model_fine = nerf_net(
             D=args.netdepth_fine,
             W=args.netwidth_fine,
             input_ch=input_ch,
@@ -611,7 +623,7 @@ def train():
             file.write(open(args.config, "r").read())
 
     # Create nerf model
-    render_kwargs_train, render_kwargs_test, start, grad_vars, optimizer = create_nerf(
+    render_kwargs_train, render_kwargs_test, start, grad_vars, optimizer = create_model(
         args
     )
     global_step = start

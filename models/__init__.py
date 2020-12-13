@@ -1,2 +1,2 @@
 from .nerf import NeRF
-from .resnetfc import ResnetBlockFC, ResnetCombineFC
+from .resnetfc import ResnetFC, ResnetCombineFC

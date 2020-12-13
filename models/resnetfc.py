@@ -1,87 +1,135 @@
+import pdb
 from torch import nn
 import torch
 
 #  import torch_scatter
 import torch.autograd.profiler as profiler
 
-def repeat_interleave(input, repeats, dim):
-    """
-    Repeat interleave, does same thing as torch.repeat_interleave but faster.
-    torch.repeat_interleave is currently very slow
-    https://github.com/pytorch/pytorch/issues/31980
-    """
-    if dim >= 0:
-        dim += 1
-    output = input.unsqueeze(dim).expand(-1, repeats, *input.shape[1:])
-    return output.reshape(-1, *input.shape[1:])
 
-
-# Resnet Blocks
-class ResnetBlockFC(nn.Module):
-    """
-    Fully connected ResNet Block class.
-    Taken from DVR code.
-    :param size_in (int): input dimension
-    :param size_out (int): output dimension
-    :param size_h (int): hidden dimension
-    """
-
-    def __init__(self, size_in, size_out=None, size_h=None, beta=0.0):
+class ResnetFC(nn.Module):
+    def __init__(
+        self,
+        D=5,
+        W=128,
+        input_ch=3,
+        input_ch_views=3,
+        output_ch=4,
+        d_latent=0,
+        beta=0.0,
+        combine_layer=3,
+        use_spade=False,
+        use_viewdirs=True,
+        *args,
+        **kwargs
+    ):
+        """
+        Resnet FC  backbone without multi-view input.
+        Improved version of original nerf net
+        :param D input size
+        :param output_ch output size
+        :param n_blocks number of Resnet blocks
+        :param d_latent latent size, added in each resnet block (0 = disable)
+        :param d_hidden hiddent dimension throughout network
+        :param beta softplus beta, 100 is reasonable; if <=0 uses ReLU activations instead
+        """
         super().__init__()
-        # Attributes
-        if size_out is None:
-            size_out = size_in
 
-        if size_h is None:
-            size_h = min(size_in, size_out)
+        self.n_blocks = D
+        self.d_latent = d_latent
+        self.d_in = input_ch
+        self.d_out = output_ch
+        self.d_hidden = W
 
-        self.size_in = size_in
-        self.size_h = size_h
-        self.size_out = size_out
-        # Submodules
-        self.fc_0 = nn.Linear(size_in, size_h)
-        self.fc_1 = nn.Linear(size_h, size_out)
+        self.lin_in = nn.Linear(input_ch + input_ch_views, W)
+        nn.init.constant_(self.lin_in.bias, 0.0)
+        nn.init.kaiming_normal_(self.lin_in.weight, a=0, mode="fan_in")
 
-        # Init
-        nn.init.constant_(self.fc_0.bias, 0.0)
-        nn.init.kaiming_normal_(self.fc_0.weight, a=0, mode="fan_in")
-        nn.init.constant_(self.fc_1.bias, 0.0)
-        nn.init.zeros_(self.fc_1.weight)
+        self.lin_out = nn.Linear(W, output_ch)
+        nn.init.constant_(self.lin_out.bias, 0.0)
+        nn.init.kaiming_normal_(self.lin_out.weight, a=0, mode="fan_in")
+
+        self.combine_layer = combine_layer
+        self.use_spade = use_spade
+
+        self.blocks = nn.ModuleList([ResnetBlockFC(W, beta=beta) for i in range(D)])
+
+        if d_latent != 0:
+            n_lin_z = min(combine_layer, D)
+            self.lin_z = nn.ModuleList([nn.Linear(d_latent, W) for i in range(n_lin_z)])
+            for i in range(n_lin_z):
+                nn.init.constant_(self.lin_z[i].bias, 0.0)
+                nn.init.kaiming_normal_(self.lin_z[i].weight, a=0, mode="fan_in")
+
+            if self.use_spade:
+                self.scale_z = nn.ModuleList(
+                    [nn.Linear(d_latent, W) for _ in range(n_lin_z)]
+                )
+                for i in range(n_lin_z):
+                    nn.init.constant_(self.scale_z[i].bias, 0.0)
+                    nn.init.kaiming_normal_(self.scale_z[i].weight, a=0, mode="fan_in")
 
         if beta > 0:
             self.activation = nn.Softplus(beta=beta)
         else:
             self.activation = nn.ReLU()
 
-        if size_in == size_out:
-            self.shortcut = None
-        else:
-            self.shortcut = nn.Linear(size_in, size_out, bias=False)
-            nn.init.constant_(self.shortcut.bias, 0.0)
-            nn.init.kaiming_normal_(self.shortcut.weight, a=0, mode="fan_in")
-
-    def forward(self, x):
-        with profiler.record_function("resblock"):
-            net = self.fc_0(self.activation(x))
-            dx = self.fc_1(self.activation(net))
-
-            if self.shortcut is not None:
-                x_s = self.shortcut(x)
+    def forward(
+        self,
+        x,
+    ):
+        """
+        :param zx (..., d_latent + d_in)
+        """
+        with profiler.record_function("resnetfc_infer"):
+            if self.d_latent > 0:
+                z = x[..., : self.d_latent]
+                x = x[..., self.d_latent :]
             else:
-                x_s = x
-            return x_s + dx
+                x = x  # 63 + 27 by default
+
+            if self.d_in > 0:
+                x = self.lin_in(x)  # 42 -> 512
+            else:
+                x = torch.zeros(self.d_hidden, device=x.device)
+
+            for blkid in range(self.n_blocks):
+                if self.d_latent > 0 and blkid < self.combine_layer:
+                    tz = self.lin_z[blkid](z)
+                    if self.use_spade:
+                        sz = self.scale_z[blkid](z)
+                        x = sz * x + tz
+                    else:
+                        x = x + tz
+
+                x = self.blocks[blkid](x)
+            out = self.lin_out(self.activation(x))
+            return out
+
+    @classmethod
+    def from_conf(cls, conf, d_in, **kwargs):
+        # PyHocon construction
+        return cls(
+            d_in,
+            n_blocks=conf.get_int("n_blocks", 5),
+            d_hidden=conf.get_int("d_hidden", 128),
+            beta=conf.get_float("beta", 0.0),
+            combine_layer=conf.get_int("combine_layer", 3),
+            combine_type=conf.get_string("combine_type", "average"),  # average | max
+            use_spade=conf.get_bool("use_spade", False),
+            **kwargs
+        )
 
 
 class ResnetCombineFC(nn.Module):
     def __init__(
         self,
-        d_in,
-        d_out=4,
+        D,
+        output_ch=4,
         n_blocks=5,
         d_latent=0,
-        d_hidden=128,
+        W=128,
         beta=0.0,
-        combine_layer=1000,
+        combine_layer=3,
         combine_type="average",
         use_spade=False,
     ):
@@ -94,41 +142,39 @@ class ResnetCombineFC(nn.Module):
         :param beta softplus beta, 100 is reasonable; if <=0 uses ReLU activations instead
         """
         super().__init__()
-        if d_in > 0:
-            self.lin_in = nn.Linear(d_in, d_hidden)
+        if D > 0:
+            self.lin_in = nn.Linear(D, W)
             nn.init.constant_(self.lin_in.bias, 0.0)
             nn.init.kaiming_normal_(self.lin_in.weight, a=0, mode="fan_in")
 
-        self.lin_out = nn.Linear(d_hidden, d_out)
+        self.lin_out = nn.Linear(W, output_ch)
         nn.init.constant_(self.lin_out.bias, 0.0)
         nn.init.kaiming_normal_(self.lin_out.weight, a=0, mode="fan_in")
 
         self.n_blocks = n_blocks
         self.d_latent = d_latent
-        self.d_in = d_in
-        self.d_out = d_out
-        self.d_hidden = d_hidden
+        self.d_in = D
+        self.d_out = output_ch
+        self.d_hidden = W
 
         self.combine_layer = combine_layer
         self.combine_type = combine_type
         self.use_spade = use_spade
 
         self.blocks = nn.ModuleList(
-            [ResnetBlockFC(d_hidden, beta=beta) for i in range(n_blocks)]
+            [ResnetBlockFC(W, beta=beta) for i in range(n_blocks)]
         )
 
         if d_latent != 0:
             n_lin_z = min(combine_layer, n_blocks)
-            self.lin_z = nn.ModuleList(
-                [nn.Linear(d_latent, d_hidden) for i in range(n_lin_z)]
-            )
+            self.lin_z = nn.ModuleList([nn.Linear(d_latent, W) for i in range(n_lin_z)])
             for i in range(n_lin_z):
                 nn.init.constant_(self.lin_z[i].bias, 0.0)
                 nn.init.kaiming_normal_(self.lin_z[i].weight, a=0, mode="fan_in")
 
             if self.use_spade:
                 self.scale_z = nn.ModuleList(
-                    [nn.Linear(d_latent, d_hidden) for _ in range(n_lin_z)]
+                    [nn.Linear(d_latent, W) for _ in range(n_lin_z)]
                 )
                 for i in range(n_lin_z):
                     nn.init.constant_(self.scale_z[i].bias, 0.0)
@@ -212,115 +258,69 @@ class ResnetCombineFC(nn.Module):
         )
 
 
-class ResnetFC(nn.Module):
-    def __init__(
-        self,
-        d_in,
-        d_out=4,
-        n_blocks=5,
-        d_latent=0,
-        d_hidden=128,
-        beta=0.0,
-        combine_layer=3,
-        use_spade=False,
-    ):
-        """
-        Resnet FC  backbone without multi-view input.
-        Improved version of original nerf net
-        :param d_in input size
-        :param d_out output size
-        :param n_blocks number of Resnet blocks
-        :param d_latent latent size, added in each resnet block (0 = disable)
-        :param d_hidden hiddent dimension throughout network
-        :param beta softplus beta, 100 is reasonable; if <=0 uses ReLU activations instead
-        """
+# Resnet Blocks
+class ResnetBlockFC(nn.Module):
+    """
+    Fully connected ResNet Block class.
+    Taken from DVR code.
+    :param size_in (int): input dimension
+    :param size_out (int): output dimension
+    :param size_h (int): hidden dimension
+    """
+
+    def __init__(self, size_in, size_out=None, size_h=None, beta=0.0):
         super().__init__()
-        if d_in > 0:
-            self.lin_in = nn.Linear(d_in, d_hidden)
-            nn.init.constant_(self.lin_in.bias, 0.0)
-            nn.init.kaiming_normal_(self.lin_in.weight, a=0, mode="fan_in")
+        # Attributes
+        if size_out is None:
+            size_out = size_in
 
-        self.lin_out = nn.Linear(d_hidden, d_out)
-        nn.init.constant_(self.lin_out.bias, 0.0)
-        nn.init.kaiming_normal_(self.lin_out.weight, a=0, mode="fan_in")
+        if size_h is None:
+            size_h = min(size_in, size_out)
 
-        self.n_blocks = n_blocks
-        self.d_latent = d_latent
-        self.d_in = d_in
-        self.d_out = d_out
-        self.d_hidden = d_hidden
+        self.size_in = size_in
+        self.size_h = size_h
+        self.size_out = size_out
+        # Submodules
+        self.fc_0 = nn.Linear(size_in, size_h)
+        self.fc_1 = nn.Linear(size_h, size_out)
 
-        self.combine_layer = combine_layer
-        self.use_spade = use_spade
-
-        self.blocks = nn.ModuleList(
-            [ResnetBlockFC(d_hidden, beta=beta) for i in range(n_blocks)]
-        )
-
-        if d_latent != 0:
-            n_lin_z = min(combine_layer, n_blocks)
-            self.lin_z = nn.ModuleList(
-                [nn.Linear(d_latent, d_hidden) for i in range(n_lin_z)]
-            )
-            for i in range(n_lin_z):
-                nn.init.constant_(self.lin_z[i].bias, 0.0)
-                nn.init.kaiming_normal_(self.lin_z[i].weight, a=0, mode="fan_in")
-
-            if self.use_spade:
-                self.scale_z = nn.ModuleList(
-                    [nn.Linear(d_latent, d_hidden) for _ in range(n_lin_z)]
-                )
-                for i in range(n_lin_z):
-                    nn.init.constant_(self.scale_z[i].bias, 0.0)
-                    nn.init.kaiming_normal_(self.scale_z[i].weight, a=0, mode="fan_in")
+        # Init
+        nn.init.constant_(self.fc_0.bias, 0.0)
+        nn.init.kaiming_normal_(self.fc_0.weight, a=0, mode="fan_in")
+        nn.init.constant_(self.fc_1.bias, 0.0)
+        nn.init.zeros_(self.fc_1.weight)
 
         if beta > 0:
             self.activation = nn.Softplus(beta=beta)
         else:
             self.activation = nn.ReLU()
 
-    def forward(self, x, sigma_only=False):
-        """
-        :param zx (..., d_latent + d_in)
-        """
-        with profiler.record_function("resnetfc_infer"):
-            assert x.size(-1) == self.d_latent + self.d_in
-            if self.d_latent > 0:
-                z = x[..., : self.d_latent]
-                x = x[..., self.d_latent :]
+        if size_in == size_out:
+            self.shortcut = None
+        else:
+            self.shortcut = nn.Linear(size_in, size_out, bias=False)
+            nn.init.constant_(self.shortcut.bias, 0.0)
+            nn.init.kaiming_normal_(self.shortcut.weight, a=0, mode="fan_in")
+
+    def forward(self, x):
+        with profiler.record_function("resblock"):
+            net = self.fc_0(self.activation(x))
+            dx = self.fc_1(self.activation(net))
+
+            if self.shortcut is not None:
+                x_s = self.shortcut(x)
             else:
-                x = x
+                x_s = x
+            return x_s + dx
 
-            if self.d_in > 0:
-                x = self.lin_in(x)  # 42 -> 512
-            else:
-                x = torch.zeros(self.d_hidden, device=x.device)
 
-            for blkid in range(self.n_blocks):
-                if self.d_latent > 0 and blkid < self.combine_layer:
-                    tz = self.lin_z[blkid](z)
-                    if self.use_spade:
-                        sz = self.scale_z[blkid](z)
-                        x = sz * x + tz
-                    else:
-                        x = x + tz
-
-                x = self.blocks[blkid](x)
-            out = self.lin_out(self.activation(x))
-            if sigma_only:
-                return out[..., -1]  # return sigma channel only
-            return out
-
-    @classmethod
-    def from_conf(cls, conf, d_in, **kwargs):
-        # PyHocon construction
-        return cls(
-            d_in,
-            n_blocks=conf.get_int("n_blocks", 5),
-            d_hidden=conf.get_int("d_hidden", 128),
-            beta=conf.get_float("beta", 0.0),
-            combine_layer=conf.get_int("combine_layer", 3),
-            combine_type=conf.get_string("combine_type", "average"),  # average | max
-            use_spade=conf.get_bool("use_spade", False),
-            **kwargs
-        )
+def repeat_interleave(input, repeats, dim):
+    """
+    Repeat interleave, does same thing as torch.repeat_interleave but faster.
+    torch.repeat_interleave is currently very slow
+    https://github.com/pytorch/pytorch/issues/31980
+    """
+    if dim >= 0:
+        dim += 1
+    output = input.unsqueeze(dim).expand(-1, repeats, *input.shape[1:])
+    return output.reshape(-1, *input.shape[1:])

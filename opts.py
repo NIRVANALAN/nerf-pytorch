@@ -2,13 +2,14 @@ import configargparse
 
 
 def config_parser():
-
     parser = configargparse.ArgumentParser()
     parser.add_argument("--config", is_config_file=True, help="config file path")
     parser.add_argument("--expname", type=str, help="experiment name")
+
     parser.add_argument(
         "--basedir", type=str, default="./logs/", help="where to store ckpts and logs"
     )
+
     parser.add_argument(
         "--datadir", type=str, default="./data/llff/fern", help="input data directory"
     )
@@ -232,6 +233,13 @@ def config_parser():
         type=int,
         default=50000,
         help="frequency of render_poses video saving",
+    )
+    # model arch
+    parser.add_argument(
+        "--arch",
+        type=str,
+        default="nerf",
+        help="specific network architecture. NeRF by default",
     )
 
     return parser
