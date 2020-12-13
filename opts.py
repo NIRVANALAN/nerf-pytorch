@@ -241,5 +241,10 @@ def config_parser():
         default="nerf",
         help="specific network architecture. NeRF by default",
     )
+    parser.add_argument(
+        "--viewdirs_res",
+        action="store_false",  # !
+        help="whether to send viewdirs as final residual layer",
+    )
 
     return parser

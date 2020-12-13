@@ -1,4 +1,4 @@
-expname = leaves_test
+expname = leaves_resnet
 basedir = ./logs
 datadir = ../nerf_dataset/nerf_llff_data/leaves
 dataset_type = llff
@@ -15,5 +15,5 @@ raw_noise_std = 1e0
 
 
 arch = resnetFC
-netdepth = 5
-netwidth = 128
+netdepth = 4
+netwidth = 256

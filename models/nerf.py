@@ -17,6 +17,7 @@ class NeRF(nn.Module):
         output_ch=4,
         skips=[4],
         use_viewdirs=True,
+        viewdirs_res=True,
     ):
         """"""
         super(NeRF, self).__init__()

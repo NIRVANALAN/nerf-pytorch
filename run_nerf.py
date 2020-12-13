@@ -253,6 +253,7 @@ def create_model(args):
         skips=skips,
         input_ch_views=input_ch_views,
         use_viewdirs=args.use_viewdirs,
+        viewdirs_res=args.viewdirs_res,
     ).to(device)
 
     print(model)
@@ -269,6 +270,7 @@ def create_model(args):
             skips=skips,
             input_ch_views=input_ch_views,
             use_viewdirs=args.use_viewdirs,
+            viewdirs_res=args.viewdirs_res,
         ).to(device)
         grad_vars += list(model_fine.parameters())
 
