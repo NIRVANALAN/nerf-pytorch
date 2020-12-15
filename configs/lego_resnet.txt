@@ -1,4 +1,4 @@
-expname = blender_paper_lego
+expname = blender_paper_lego_resnet_d8
 basedir = ./logs
 datadir = ../nerf_dataset/nerf_synthetic/lego
 dataset_type = blender
@@ -19,3 +19,5 @@ precrop_frac = 0.5
 half_res = True
 
 arch resnetFC
+netdepth = 8
+netwidth = 256

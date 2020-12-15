@@ -216,7 +216,7 @@ def config_parser():
     parser.add_argument(
         "--i_print",
         type=int,
-        default=100,
+        default=500,
         help="frequency of console printout and metric loggin",
     )
     parser.add_argument(
@@ -245,6 +245,13 @@ def config_parser():
         "--viewdirs_res",
         action="store_false",  # !
         help="whether to send viewdirs as final residual layer",
+    )
+
+    parser.add_argument(
+        "--enc_type",
+        type=str,
+        default="none",
+        help="Whether to use uncoder & the type of encoder",
     )
 
     return parser
