@@ -214,9 +214,15 @@ def config_parser():
 
     # logging/saving options
     parser.add_argument(
+        "--epoch",
+        type=int,
+        default=200000,
+        help="frequency of console printout and metric loggin",
+    )
+    parser.add_argument(
         "--i_print",
         type=int,
-        default=500,
+        default=100,
         help="frequency of console printout and metric loggin",
     )
     parser.add_argument(
@@ -241,17 +247,28 @@ def config_parser():
         default="nerf",
         help="specific network architecture. NeRF by default",
     )
+
+    # semantic encoder
     parser.add_argument(
         "--viewdirs_res",
         action="store_false",  # !
         help="whether to send viewdirs as final residual layer",
     )
-
     parser.add_argument(
         "--enc_type",
         type=str,
         default="none",
         help="Whether to use uncoder & the type of encoder",
+    )
+    parser.add_argument(
+        "--stop_encoder_grad",
+        action="store_true",
+        help="whether to freeze encooder gradient",
+    )
+    parser.add_argument(
+        "--use_spade",
+        action="store_true",
+        help="Whether to use spade-like spatial feature transform",
     )
 
     return parser

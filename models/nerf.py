@@ -5,6 +5,7 @@ torch.autograd.set_detect_anomaly(True)
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
+import torch.autograd.profiler as profiler
 
 # Model
 class NeRF(nn.Module):
@@ -18,6 +19,7 @@ class NeRF(nn.Module):
         skips=[4],
         use_viewdirs=True,
         viewdirs_res=True,
+        d_latent=0,
     ):
         """"""
         super(NeRF, self).__init__()
@@ -50,29 +52,30 @@ class NeRF(nn.Module):
             self.output_linear = nn.Linear(W, output_ch)
 
     def forward(self, x):
-        input_pts, input_views = torch.split(
-            x, [self.input_ch, self.input_ch_views], dim=-1
-        )
-        h = input_pts
-        for i, l in enumerate(self.pts_linears):
-            h = self.pts_linears[i](h)
-            h = F.relu(h)
-            if i in self.skips:
-                h = torch.cat([input_pts, h], -1)
-
-        if self.use_viewdirs:
-            alpha = self.alpha_linear(h)
-            feature = self.feature_linear(h)
-            h = torch.cat([feature, input_views], -1)
-
-            for i, l in enumerate(self.views_linears):
-                h = self.views_linears[i](h)
+        with profiler.record_function("nerf_mlp inference"):
+            input_pts, input_views = torch.split(
+                x, [self.input_ch, self.input_ch_views], dim=-1
+            )
+            h = input_pts
+            for i, l in enumerate(self.pts_linears):
+                h = self.pts_linears[i](h)
                 h = F.relu(h)
+                if i in self.skips:
+                    h = torch.cat([input_pts, h], -1)
 
-            rgb = self.rgb_linear(h)
-            outputs = torch.cat([rgb, alpha], -1)
-        else:
-            outputs = self.output_linear(h)
+            if self.use_viewdirs:
+                alpha = self.alpha_linear(h)
+                feature = self.feature_linear(h)
+                h = torch.cat([feature, input_views], -1)
+
+                for i, l in enumerate(self.views_linears):
+                    h = self.views_linears[i](h)
+                    h = F.relu(h)
+
+                rgb = self.rgb_linear(h)
+                outputs = torch.cat([rgb, alpha], -1)
+            else:
+                outputs = self.output_linear(h)
 
         return outputs
 

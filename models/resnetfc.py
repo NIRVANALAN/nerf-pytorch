@@ -30,7 +30,7 @@ class ResnetFC(nn.Module):
         combine_layer=3,
         use_spade=False,
         use_viewdirs=True,
-        viewdirs_res=True,
+        viewdirs_res=False,
         *args,
         **kwargs
     ):
@@ -48,6 +48,7 @@ class ResnetFC(nn.Module):
 
         self.D = D
         self.d_latent = d_latent
+        self.use_spade = use_spade
         self.input_ch = input_ch
         self.input_ch_views = input_ch_views
         self.output_ch = output_ch
@@ -65,33 +66,29 @@ class ResnetFC(nn.Module):
             self.views_linears = nn.ModuleList([nn.Linear(input_ch_views + W, W // 2)])
         else:
             self.lin_in = nn.Linear(input_ch + input_ch_views, W)
-            self.output_linear = nn.Linear(W, output_ch)
-
-        self.lin_out = nn.Linear(W, output_ch)
-        nn.init.constant_(self.lin_out.bias, 0.0)
-        nn.init.kaiming_normal_(self.lin_out.weight, a=0, mode="fan_in")
+            self.lin_out = nn.Linear(W, output_ch)
+            nn.init.constant_(self.lin_out.bias, 0.0)
+            nn.init.kaiming_normal_(self.lin_out.weight, a=0, mode="fan_in")
 
         self.combine_layer = combine_layer
         # self.use_spade = use_spade
 
-        self.pts_linears = nn.ModuleList(
-            [ResnetBlockFC(W, beta=beta) for i in range(D)]
-        )
+        self.blocks = nn.ModuleList([ResnetBlockFC(W, beta=beta) for i in range(D)])
 
         if d_latent != 0:
             n_lin_z = min(combine_layer, D)
             self.lin_z = nn.ModuleList([nn.Linear(d_latent, W) for i in range(n_lin_z)])
-            # for i in range(n_lin_z):
-            #     nn.init.constant_(self.lin_z[i].bias, 0.0)
-            #     nn.init.kaiming_normal_(self.lin_z[i].weight, a=0, mode="fan_in")
+            for i in range(n_lin_z):
+                nn.init.constant_(self.lin_z[i].bias, 0.0)
+                nn.init.kaiming_normal_(self.lin_z[i].weight, a=0, mode="fan_in")
 
-            # if self.use_spade:
-            #     self.scale_z = nn.ModuleList(
-            #         [nn.Linear(d_latent, W) for _ in range(n_lin_z)]
-            #     )
-            # for i in range(n_lin_z):
-            #     nn.init.constant_(self.scale_z[i].bias, 0.0)
-            #     nn.init.kaiming_normal_(self.scale_z[i].weight, a=0, mode="fan_in")
+            if self.use_spade:
+                self.scale_z = nn.ModuleList(
+                    [nn.Linear(d_latent, W) for _ in range(n_lin_z)]
+                )
+                for i in range(n_lin_z):
+                    nn.init.constant_(self.scale_z[i].bias, 0.0)
+                    nn.init.kaiming_normal_(self.scale_z[i].weight, a=0, mode="fan_in")
 
         # if beta > 0:
         #     self.activation = nn.Softplus(beta=beta)
@@ -100,15 +97,17 @@ class ResnetFC(nn.Module):
 
     def forward(
         self,
-        x,
+        xz,
     ):
         """
         :param zx (..., d_latent + d_in)
         """
         with profiler.record_function("resnetfc_infer"):
             if self.d_latent > 0:
-                z = x[..., : self.d_latent]
-                x = x[..., self.d_latent :]
+                z = xz[..., : self.d_latent]
+                x = xz[..., self.d_latent :]
+            else:
+                x = xz
 
             if self.viewdirs_res:
                 input_pts, input_views = torch.split(
@@ -123,16 +122,16 @@ class ResnetFC(nn.Module):
             # else:
             #     h = torch.zeros(self.W, device=x.device)  # ? Generative model?
 
-            for i, l in enumerate(self.pts_linears):
+            for i, l in enumerate(self.blocks):
                 if self.d_latent > 0 and i < self.combine_layer:
-                    tz = self.lin_z[i](h)
+                    tz = self.lin_z[i](z)
                     if self.use_spade:
-                        sz = self.scale_z[i](h)
-                        x = sz * x + tz
+                        sz = self.scale_z[i](z)
+                        h = sz * h + tz
                     else:
-                        x = x + tz
+                        h = h + tz
 
-                h = self.pts_linears[i](h)
+                h = self.blocks[i](h)
 
             if self.viewdirs_res:
                 alpha = self.alpha_linear(h)
@@ -146,7 +145,7 @@ class ResnetFC(nn.Module):
                 rgb = self.rgb_linear(h)
                 outputs = torch.cat([rgb, alpha], -1)
             else:
-                outputs = self.output_linear(h)
+                outputs = self.lin_out(h)
             return outputs
 
     @classmethod
@@ -229,7 +228,7 @@ class ResnetCombineFC(nn.Module):
         else:
             self.activation = nn.ReLU()
 
-        init_model(self)
+        # init_model(self)
 
     def forward(
         self,

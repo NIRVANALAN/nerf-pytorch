@@ -13,10 +13,13 @@ import matplotlib.pyplot as plt
 from util import *
 
 from models import *
-from data import load_dv_data, load_llff_data, load_blender_data
+from data import create_dataset
+import gc
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 np.random.seed(0)
+
+# print = lambda x: print(*x, flush=True)
 
 
 def extract_mesh(render_kwargs, mesh_grid_size=80, threshold=50):
@@ -55,73 +58,18 @@ def train():
     parser = config_parser()
     args = parser.parse_args()
     # Load data
-    if args.dataset_type == "llff":
-        images, poses, bds, render_poses, i_test = load_llff_data(
-            args.datadir,
-            args.factor,
-            recenter=True,
-            bd_factor=0.75,
-            spherify=args.spherify,
-        )
-        hwf = poses[0, :3, -1]
-        poses = poses[:, :3, :4]
-        print("Loaded llff", images.shape, render_poses.shape, hwf, args.datadir)
-        if not isinstance(i_test, list):
-            i_test = [i_test]
 
-        if args.llffhold > 0:
-            print("Auto LLFF holdout,", args.llffhold)
-            i_test = np.arange(images.shape[0])[:: args.llffhold]
-
-        i_val = i_test
-        i_train = np.array(
-            [
-                i
-                for i in np.arange(int(images.shape[0]))
-                if (i not in i_test and i not in i_val)
-            ]
-        )
-
-        print("DEFINING BOUNDS")
-        if args.no_ndc:
-            near = np.ndarray.min(bds) * 0.9
-            far = np.ndarray.max(bds) * 1.0
-
-        else:
-            near = 0.0
-            far = 1.0
-        print("NEAR FAR", near, far)
-
-    elif args.dataset_type == "blender":
-        images, poses, render_poses, hwf, i_split = load_blender_data(
-            args.datadir, args.half_res, args.testskip
-        )
-        print("Loaded blender", images.shape, render_poses.shape, hwf, args.datadir)
-        i_train, i_val, i_test = i_split
-
-        near = 2.0
-        far = 6.0
-
-        if args.white_bkgd:
-            images = images[..., :3] * images[..., -1:] + (1.0 - images[..., -1:])
-        else:
-            images = images[..., :3]
-
-    elif args.dataset_type == "deepvoxels":
-
-        images, poses, render_poses, hwf, i_split = load_dv_data(
-            scene=args.shape, basedir=args.datadir, testskip=args.testskip
-        )
-
-        print("Loaded deepvoxels", images.shape, render_poses.shape, hwf, args.datadir)
-        i_train, i_val, i_test = i_split
-
-        hemi_R = np.mean(np.linalg.norm(poses[:, :3, -1], axis=-1))
-        near = hemi_R - 1.0
-        far = hemi_R + 1.0
-
-    else:
-        raise NotImplementedError("Unknown dataset type", args.dataset_type, "exiting")
+    (
+        images,
+        poses,
+        render_poses,
+        hwf,
+        i_train,
+        i_val,
+        i_test,
+        near,
+        far,
+    ) = create_dataset(args)
 
     # Cast intrinsics to right types
     H, W, focal = hwf
@@ -135,6 +83,10 @@ def train():
     basedir = args.basedir
     expname = args.expname
     os.makedirs(os.path.join(basedir, expname), exist_ok=True)
+    output_f = os.path.join(basedir, expname, "log.txt")
+    with open(output_f, "w") as train_log:
+        train_log.write("training log")
+
     f = os.path.join(basedir, expname, "args.txt")
     with open(f, "w") as file:
         for arg in sorted(vars(args)):
@@ -146,10 +98,19 @@ def train():
             file.write(open(args.config, "r").read())
 
     # Create nerf model
-    render_kwargs_train, render_kwargs_test, start, optimizer = create_model(
-        args, device
+    network = NetworkSystem(args, images.shape[1:3], device=device)
+    render_kwargs_train, render_kwargs_test, optimizer, start = (
+        network.render_kwargs_train,
+        network.render_kwargs_test,
+        network.optimizer,
+        network.start,
     )
+
+    basedir = args.basedir
+    expname = args.expname
+
     global_step = start
+    #
 
     bds_dict = {
         "near": near,
@@ -247,7 +208,7 @@ def train():
     if use_batching:
         rays_rgb = torch.Tensor(rays_rgb).to(device)
 
-    N_iters = 200000 + 1
+    N_iters = args.epoch + 1
     print("Begin")
     print("TRAIN views are", i_train)
     print("TEST views are", i_test)
@@ -311,9 +272,16 @@ def train():
                 select_inds = np.random.choice(
                     coords.shape[0],
                     size=[N_rand],
-                    replace=False,  # select 1024 by defaulj
+                    replace=False,  # select 1024 by default
                 )  # (N_rand,)
-                select_coords = coords[select_inds].long()  # (N_rand, 2)
+                select_coords = coords[
+                    select_inds
+                ].long()  # (N_rand, 2) 1024*2 by default
+
+                #! encoder
+                if args.enc_type != "none":
+                    network.encode(target, pose, focal, select_coords, img_i)  # TODO
+
                 rays_o = rays_o[
                     select_coords[:, 0], select_coords[:, 1]
                 ]  # (N_rand, 3). #* the same for all dirs beloning to the same image
@@ -321,23 +289,24 @@ def train():
                 batch_rays = torch.stack([rays_o, rays_d], 0)
                 target_s = target[
                     select_coords[:, 0], select_coords[:, 1]
-                ]  # (N_rand, 3) #* color of original image
+                ]  # (N_rand, 3) #* color of pixels in original image
 
         #####  Core optimization loop  #####
-        rgb, disp, acc, extras = render(
-            H,
-            W,
-            focal,
-            chunk=args.chunk,
-            rays=batch_rays,
-            verbose=i < 10,
-            retraw=True,
-            **render_kwargs_train,
-        )
+        with profiler.record_function("render"):
+            rgb, disp, acc, extras = render(
+                H,
+                W,
+                focal,
+                chunk=args.chunk,
+                rays=batch_rays,
+                verbose=i < 10,
+                retraw=True,
+                **render_kwargs_train,
+            )
 
         optimizer.zero_grad()
         img_loss = img2mse(rgb, target_s)
-        trans = extras["raw"][..., -1]
+        # trans = extras["raw"][..., -1]
         loss = img_loss
         psnr = mse2psnr(img_loss)
 
@@ -358,7 +327,7 @@ def train():
             param_group["lr"] = new_lrate
         ################################
 
-        dt = time.time() - time0
+        # dt = time.time() - time0
         # print(f"Step: {global_step}, Loss: {loss}, Time: {dt}")
         #####           end            #####
 
@@ -417,12 +386,20 @@ def train():
                 )
             print("Saved test set")
 
+        gc.collect()
         if i % args.i_print == 0:
-            tqdm.write(f"[TRAIN] Iter: {i} Loss: {loss.item()}  PSNR: {psnr.item()}")
+            # TODO
+            log = f"[TRAIN] Iter: {i} Loss: {loss.item()}  PSNR: {psnr.item()}\n"
+            tqdm.write(log)
+            with open(output_f, "a") as f:
+                f.write(log)
         global_step += 1
 
 
 if __name__ == "__main__":
     torch.set_default_tensor_type("torch.cuda.FloatTensor")
 
+    # with profiler.profile(profile_memory=True, use_cuda=True) as prof: # memory leak here
     train()
+
+    # print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=10))

@@ -256,6 +256,7 @@ def render(
     images=None,
     use_viewdirs=False,
     c2w_staticcam=None,
+    latent_feature=None,
     **kwargs,
 ):
     """Render rays

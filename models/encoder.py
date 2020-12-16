@@ -5,7 +5,6 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 import torchvision
-import util
 import torch.autograd.profiler as profiler
 
 
@@ -49,11 +48,12 @@ class SpatialEncoder(nn.Module):
         self.use_custom_resnet = backbone == "custom"
         self.feature_scale = feature_scale
         self.use_first_pool = use_first_pool
-        norm_layer = util.get_norm_layer(norm_type)
+        # norm_layer = util.get_norm_layer(norm_type)
 
         print("Using torchvision", backbone, "encoder")
         self.model = getattr(torchvision.models, backbone)(
-            pretrained=pretrained, norm_layer=norm_layer
+            pretrained=pretrained,
+            # norm_layer=norm_layer
         )
         # Following 2 lines need to be uncommented for older configs
         self.model.fc = nn.Sequential()
@@ -68,9 +68,10 @@ class SpatialEncoder(nn.Module):
         self.register_buffer(
             "latent_scaling", torch.empty(2, dtype=torch.float32), persistent=False
         )
+        self.bank = {}
         # self.latent (B, L, H, W)
 
-    def index(self, uv, cam_z=None, image_size=(), z_bounds=None):
+    def index(self, uv, image_size=(), z_bounds=None):
         """
         Get pixel-aligned image features at 2D image coordinates
         :param uv (B, N, 2) image points (x,y)
@@ -88,8 +89,12 @@ class SpatialEncoder(nn.Module):
                 if len(image_size) > 0:
                     if len(image_size) == 1:
                         image_size = (image_size, image_size)
+
+                    import pdb
+
+                    pdb.set_trace()
                     scale = self.latent_scaling / image_size
-                    uv = uv * scale - 1.0
+                    uv = uv * scale - 1.0  # (uv/image_size-0.5)*2
 
             uv = uv.unsqueeze(2)  # (B, N, 1, 2)
             samples = F.grid_sample(
@@ -99,14 +104,17 @@ class SpatialEncoder(nn.Module):
                 mode=self.index_interp,
                 padding_mode=self.index_padding,
             )
+
             return samples[:, :, :, 0]  # (B, C, N)
 
-    def forward(self, x):
+    def forward(self, x, img_i):
         """
         For extracting ResNet's features.
         :param x image (B, C, H, W)
         :return latent (B, latent_size, H, W)
         """
+        if img_i in self.bank:
+            return self.bank[img_i]
         if self.feature_scale != 1.0:
             x = F.interpolate(
                 x,
@@ -154,7 +162,8 @@ class SpatialEncoder(nn.Module):
         self.latent_scaling[0] = self.latent.shape[-1]
         self.latent_scaling[1] = self.latent.shape[-2]
         self.latent_scaling = self.latent_scaling / (self.latent_scaling - 1) * 2.0
-        return self.latent
+        self.bank[img_i] = self.latent
+        return self.latent  # 512 * w/2 * w/2
 
     @classmethod
     def from_conf(cls, conf):
