@@ -15,5 +15,6 @@ raw_noise_std = 1e0
 
 
 arch = resnetFC
-netdepth = 4
+netdepth = 5
 netwidth = 256
+no_reload

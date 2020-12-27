@@ -1,7 +1,6 @@
 import torch
 from torch import nn
 import torch.nn.functional as F
-import pdb
 
 #  import torch_scatter
 import torch.autograd.profiler as profiler
@@ -102,51 +101,48 @@ class ResnetFC(nn.Module):
         """
         :param zx (..., d_latent + d_in)
         """
-        with profiler.record_function("resnetfc_infer"):
-            if self.d_latent > 0:
-                z = xz[..., : self.d_latent]
-                x = xz[..., self.d_latent :]
-            else:
-                x = xz
+        # with profiler.record_function("resnetfc_infer"):
+        if self.d_latent > 0:
+            z = xz[..., : self.d_latent]
+            h = xz[..., self.d_latent :]
+        else:
+            h = xz
 
-            if self.viewdirs_res:
-                input_pts, input_views = torch.split(
-                    x, [self.input_ch, self.input_ch_views], dim=-1
-                )
-                h = input_pts
-            else:
-                h = x
+        if self.viewdirs_res:
+            h, input_views = torch.split(
+                h, [self.input_ch, self.input_ch_views], dim=-1
+            )
 
-            # if self.input_ch > 0:
-            h = self.lin_in(h)  #  -> 512
-            # else:
-            #     h = torch.zeros(self.W, device=x.device)  # ? Generative model?
+        # if self.input_ch > 0:
+        h = self.lin_in(h)  #  -> 512
+        # else:
+        #     h = torch.zeros(self.W, device=x.device)  # ? Generative model?
 
-            for i, l in enumerate(self.blocks):
-                if self.d_latent > 0 and i < self.combine_layer:
-                    tz = self.lin_z[i](z)
-                    if self.use_spade:
-                        sz = self.scale_z[i](z)
-                        h = sz * h + tz
-                    else:
-                        h = h + tz
+        for i, l in enumerate(self.blocks):
+            if self.d_latent > 0 and i < self.combine_layer:
+                if self.use_spade:
+                    h = self.scale_z[i](z) * h + self.lin_z[i](z)
+                else:
+                    h += self.lin_z[i](z)
+            elif i == self.combine_layer:
+                h = combine_interleaved(h, agg_type="average")  # h = 2*B*256
 
-                h = self.blocks[i](h)
+            h = self.blocks[i](h)
 
-            if self.viewdirs_res:
-                alpha = self.alpha_linear(h)
-                feature = self.feature_linear(h)
-                h = torch.cat([feature, input_views], -1)
+        if self.viewdirs_res:
+            alpha = self.alpha_linear(h)
+            feature = self.feature_linear(h)
+            h = torch.cat([feature, input_views], -1)
 
-                for i, l in enumerate(self.views_linears):
-                    h = self.views_linears[i](h)
-                    h = F.relu(h)
+            for i, l in enumerate(self.views_linears):
+                h = self.views_linears[i](h)
+                h = F.relu(h)
 
-                rgb = self.rgb_linear(h)
-                outputs = torch.cat([rgb, alpha], -1)
-            else:
-                outputs = self.lin_out(h)
-            return outputs
+            rgb = self.rgb_linear(h)
+            outputs = torch.cat([rgb, alpha], -1)
+        else:
+            outputs = self.lin_out(h)
+        return outputs
 
     @classmethod
     def from_conf(cls, conf, d_in, **kwargs):
@@ -241,52 +237,50 @@ class ResnetCombineFC(nn.Module):
         Tensor will be reshaped to (-1, combine_inner_dims, ...) and reduced using combine_type
         on dim 1, at combine_layer
         """
-        with profiler.record_function("resnetfc_infer"):
-            assert zx.size(-1) == self.d_latent + self.d_in
-            if self.d_latent > 0:
-                z = zx[..., : self.d_latent]
-                x = zx[..., self.d_latent :]
-            else:
-                x = zx
-            if self.d_in > 0:
-                x = self.lin_in(x)
-            else:
-                x = torch.zeros(self.d_hidden, device=zx.device)
+        # with profiler.record_function("resnetfc_infer"):
+        assert zx.size(-1) == self.d_latent + self.d_in
+        if self.d_latent > 0:
+            z = zx[..., : self.d_latent]
+            x = zx[..., self.d_latent :]
+        else:
+            x = zx
+        if self.d_in > 0:
+            x = self.lin_in(x)
+        else:
+            x = torch.zeros(self.d_hidden, device=zx.device)
 
-            for blkid in range(self.n_blocks):
-                if blkid == self.combine_layer:
-                    # The following implements camera frustum culling, requires torch_scatter
-                    #  if combine_index is not None:
-                    #      combine_type = (
-                    #          "mean"
-                    #          if self.combine_type == "average"
-                    #          else self.combine_type
-                    #      )
-                    #      if dim_size is not None:
-                    #          assert isinstance(dim_size, int)
-                    #      x = torch_scatter.scatter(
-                    #          x,
-                    #          combine_index,
-                    #          dim=0,
-                    #          dim_size=dim_size,
-                    #          reduce=combine_type,
-                    #      )
-                    #  else:
-                    x = util.combine_interleaved(
-                        x, combine_inner_dims, self.combine_type
-                    )
+        for blkid in range(self.n_blocks):
+            if blkid == self.combine_layer:
+                # The following implements camera frustum culling, requires torch_scatter
+                #  if combine_index is not None:
+                #      combine_type = (
+                #          "mean"
+                #          if self.combine_type == "average"
+                #          else self.combine_type
+                #      )
+                #      if dim_size is not None:
+                #          assert isinstance(dim_size, int)
+                #      x = torch_scatter.scatter(
+                #          x,
+                #          combine_index,
+                #          dim=0,
+                #          dim_size=dim_size,
+                #          reduce=combine_type,
+                #      )
+                #  else:
+                x = util.combine_interleaved(x, combine_inner_dims, self.combine_type)
 
-                if self.d_latent > 0 and blkid < self.combine_layer:
-                    tz = self.lin_z[blkid](z)
-                    if self.use_spade:
-                        sz = self.scale_z[blkid](z)
-                        x = sz * x + tz
-                    else:
-                        x = x + tz
+            if self.d_latent > 0 and blkid < self.combine_layer:
+                tz = self.lin_z[blkid](z)
+                if self.use_spade:
+                    sz = self.scale_z[blkid](z)
+                    x = sz * x + tz
+                else:
+                    x = x + tz
 
-                x = self.blocks[blkid](x)
-            out = self.lin_out(self.activation(x))
-            return out
+            x = self.blocks[blkid](x)
+        out = self.lin_out(self.activation(x))
+        return out
 
     @classmethod
     def from_conf(cls, conf, d_in, **kwargs):
@@ -348,15 +342,15 @@ class ResnetBlockFC(nn.Module):
             nn.init.kaiming_normal_(self.shortcut.weight, a=0, mode="fan_in")
 
     def forward(self, x):
-        with profiler.record_function("resblock"):
-            net = self.fc_0(self.activation(x))
-            dx = self.fc_1(self.activation(net))
+        # with profiler.record_function("resblock"):
+        net = self.fc_0(self.activation(x))
+        dx = self.fc_1(self.activation(net))
 
-            if self.shortcut is not None:
-                x_s = self.shortcut(x)
-            else:
-                x_s = x
-            return x_s + dx
+        if self.shortcut is not None:
+            x_s = self.shortcut(x)
+        else:
+            x_s = x
+        return x_s + dx
 
 
 def repeat_interleave(input, repeats, dim):
@@ -369,3 +363,18 @@ def repeat_interleave(input, repeats, dim):
         dim += 1
     output = input.unsqueeze(dim).expand(-1, repeats, *input.shape[1:])
     return output.reshape(-1, *input.shape[1:])
+
+
+def combine_interleaved(t, agg_type="average"):
+    # if len(inner_dims) == 1 and inner_dims[0] == 1:
+    #     return t
+    # t = t.reshape(-1, *inner_dims, *t.shape[1:])
+    if t.shape[0] == 1 or t.dim() == 2:  # single view input
+        return t
+    if agg_type == "average":
+        t = torch.mean(t, dim=0)
+    elif agg_type == "max":
+        t = torch.max(t, dim=0)[0]  # remove indices
+    else:
+        raise NotImplementedError("Unsupported combine type " + agg_type)
+    return t

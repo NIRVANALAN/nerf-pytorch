@@ -68,7 +68,6 @@ class SpatialEncoder(nn.Module):
         self.register_buffer(
             "latent_scaling", torch.empty(2, dtype=torch.float32), persistent=False
         )
-        self.bank = {}
         # self.latent (B, L, H, W)
 
     def index(self, uv, image_size=(), z_bounds=None):
@@ -83,6 +82,9 @@ class SpatialEncoder(nn.Module):
         """
         with profiler.record_function("encoder_index"):
             if uv.shape[0] == 1 and self.latent.shape[0] > 1:
+                import ipdb
+
+                ipdb.set_trace()
                 uv = uv.expand(self.latent.shape[0], -1, -1)
 
             with profiler.record_function("encoder_index_pre"):
@@ -90,9 +92,6 @@ class SpatialEncoder(nn.Module):
                     if len(image_size) == 1:
                         image_size = (image_size, image_size)
 
-                    import pdb
-
-                    pdb.set_trace()
                     scale = self.latent_scaling / image_size
                     uv = uv * scale - 1.0  # (uv/image_size-0.5)*2
 
@@ -107,14 +106,15 @@ class SpatialEncoder(nn.Module):
 
             return samples[:, :, :, 0]  # (B, C, N)
 
-    def forward(self, x, img_i):
+    def forward(
+        self,
+        x,
+    ):
         """
         For extracting ResNet's features.
         :param x image (B, C, H, W)
         :return latent (B, latent_size, H, W)
         """
-        if img_i in self.bank:
-            return self.bank[img_i]
         if self.feature_scale != 1.0:
             x = F.interpolate(
                 x,
@@ -162,7 +162,7 @@ class SpatialEncoder(nn.Module):
         self.latent_scaling[0] = self.latent.shape[-1]
         self.latent_scaling[1] = self.latent.shape[-2]
         self.latent_scaling = self.latent_scaling / (self.latent_scaling - 1) * 2.0
-        self.bank[img_i] = self.latent
+        # self.bank[img_i] = self.latent
         return self.latent  # 512 * w/2 * w/2
 
     @classmethod

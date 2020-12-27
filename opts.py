@@ -42,7 +42,7 @@ def config_parser():
     parser.add_argument(
         "--chunk",
         type=int,
-        default=1024 * 32,
+        default=1024 * 16,
         help="number of rays processed in parallel, decrease if running out of memory",
     )
     parser.add_argument(
@@ -237,7 +237,7 @@ def config_parser():
     parser.add_argument(
         "--i_video",
         type=int,
-        default=50000,
+        default=100000,
         help="frequency of render_poses video saving",
     )
     # model arch
@@ -251,7 +251,7 @@ def config_parser():
     # semantic encoder
     parser.add_argument(
         "--viewdirs_res",
-        action="store_false",  # !
+        action="store_true",  # !
         help="whether to send viewdirs as final residual layer",
     )
     parser.add_argument(
@@ -269,6 +269,35 @@ def config_parser():
         "--use_spade",
         action="store_true",
         help="Whether to use spade-like spatial feature transform",
+    )
+    # srn dataset
+    parser.add_argument("--srn_object_id", type=int, default=0, help="srn object id")
+    parser.add_argument(
+        "--srn_input_views", type=int, default=2, help="srn input view number"
+    )
+    parser.add_argument(
+        "--srn_input_views_id", type=str, default="0", help="srn input views id"
+    )
+    parser.add_argument(
+        "--srn_encode_views_id",
+        type=str,
+        default="-1",
+        help="fixed training views for encoding view spaces",
+    )
+    parser.add_argument(
+        "--srn_test_idx_interv", type=int, default=2, help="test some ids"
+    )
+    parser.add_argument(
+        "--normalize_z", action="store_true", help="Whether to shift z into origin"
+    )
+    parser.add_argument(
+        "--transform_view_spaces",
+        action="store_true",
+        help="Whether to transform coords into view space",
+    )
+
+    parser.add_argument(
+        "--index_padding", type=str, default="border", help="grid_sample() padding mode"
     )
 
     return parser

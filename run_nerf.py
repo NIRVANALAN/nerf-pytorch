@@ -1,4 +1,6 @@
 import os
+
+import ipdb
 from opts import config_parser
 import numpy as np
 import imageio
@@ -16,10 +18,15 @@ from models import *
 from data import create_dataset
 import gc
 
+torch.set_default_tensor_type("torch.cuda.FloatTensor")
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 np.random.seed(0)
 
 # print = lambda x: print(*x, flush=True)
+
+todevice = (
+    lambda x: x.to(device) if type(x) is torch.Tensor else torch.Tensor(x).to(device)
+)  # for compatibility. torch.Tensor(tensor) will fail if tensor already on cuda
 
 
 def extract_mesh(render_kwargs, mesh_grid_size=80, threshold=50):
@@ -54,7 +61,7 @@ def extract_mesh(render_kwargs, mesh_grid_size=80, threshold=50):
     return mesh
 
 
-def train():
+def main():
     parser = config_parser()
     args = parser.parse_args()
     # Load data
@@ -69,6 +76,10 @@ def train():
         i_test,
         near,
         far,
+        c,
+        data,
+        img_Tensor,
+        i_fixed,
     ) = create_dataset(args)
 
     # Cast intrinsics to right types
@@ -84,7 +95,7 @@ def train():
     expname = args.expname
     os.makedirs(os.path.join(basedir, expname), exist_ok=True)
     output_f = os.path.join(basedir, expname, "log.txt")
-    with open(output_f, "w") as train_log:
+    with open(output_f, "a") as train_log:
         train_log.write("training log")
 
     f = os.path.join(basedir, expname, "args.txt")
@@ -98,7 +109,7 @@ def train():
             file.write(open(args.config, "r").read())
 
     # Create nerf model
-    network = NetworkSystem(args, images.shape[1:3], device=device)
+    network = NetworkSystem(args, list(images.shape[1:3]), device=device)
     render_kwargs_train, render_kwargs_test, optimizer, start = (
         network.render_kwargs_train,
         network.render_kwargs_test,
@@ -120,7 +131,7 @@ def train():
     render_kwargs_test.update(bds_dict)
 
     # Move testing data to GPU
-    render_poses = torch.Tensor(render_poses).to(device)
+    render_poses = todevice(render_poses)
 
     # Short circuit if only rendering out from trained model
     if args.render_only:
@@ -184,29 +195,51 @@ def train():
     # Prepare raybatch tensor if batching random rays
     N_rand = args.N_rand
     use_batching = not args.no_batching
+
+    # Move training data to GPU
+    images = todevice(images)
+    poses = todevice(poses)
+
     if use_batching:
         # For random ray batching
+
         print("get rays")
-        rays = np.stack(
-            [get_rays_np(H, W, focal, p) for p in poses[:, :3, :4]], 0
+        # rays = np.stack(
+        #     [get_rays_np(H, W, focal, p) for p in poses[:, :3, :4]], 0
+        # )  # [N, ro+rd, H, W, 3] #?
+        # print("done, concats")
+        # rays_rgb = np.concatenate([rays, images[:, None]], 1)  # [N, ro+rd+rgb, H, W, 3]
+        # rays_rgb = np.transpose(rays_rgb, [0, 2, 3, 1, 4])  # [N, H, W, ro+rd+rgb, 3]
+        # rays_rgb = np.stack([rays_rgb[i] for i in i_train], 0)  # train images only
+        # rays_rgb = np.reshape(rays_rgb, [-1, 3, 3])  # [(N-1)*H*W, ro+rd+rgb, 3]
+        # rays_rgb = rays_rgb.astype(np.float32)
+        # print("shuffle rays")
+        # np.random.shuffle(rays_rgb)
+
+        # torch version
+
+        rays = torch.stack(  # TODO
+            [get_rays(H, W, focal, p, c) for p in poses[:, :3, :4]], 0
         )  # [N, ro+rd, H, W, 3] #?
+
         print("done, concats")
-        rays_rgb = np.concatenate([rays, images[:, None]], 1)  # [N, ro+rd+rgb, H, W, 3]
-        rays_rgb = np.transpose(rays_rgb, [0, 2, 3, 1, 4])  # [N, H, W, ro+rd+rgb, 3]
-        rays_rgb = np.stack([rays_rgb[i] for i in i_train], 0)  # train images only
-        rays_rgb = np.reshape(rays_rgb, [-1, 3, 3])  # [(N-1)*H*W, ro+rd+rgb, 3]
-        rays_rgb = rays_rgb.astype(np.float32)
+        rays_rgb = torch.cat([rays, images[:, None]], 1)  # [N, ro+rd+rgb, H, W, 3]
+        rays_rgb = rays_rgb.permute(0, 2, 3, 1, 4)  # [N, H, W, ro+rd+rgb, 3]
+        rays_rgb = torch.stack([rays_rgb[i] for i in i_train], 0)  # train images only
+
+        rays_rgb = rays_rgb.view(-1, 3, 3)
+        # rays_rgb = torch.reshape(rays_rgb, [-1, 3, 3])  # [(N-1)*H*W, ro+rd+rgb, 3]
+
         print("shuffle rays")
-        np.random.shuffle(rays_rgb)
+        # rays_rgb = rays_rgb.astype(np.float32)
+        # np.random.shuffle(rays_rgb) # * shuffle along the first axis
+        rays_rgb = rays_rgb[torch.randperm(rays_rgb.size(0))]
+        # # to cuda
+
+        rays_rgb = todevice(rays_rgb)
 
         print("done")
         i_batch = 0
-
-    # Move training data to GPU
-    images = torch.Tensor(images).to(device)
-    poses = torch.Tensor(poses).to(device)
-    if use_batching:
-        rays_rgb = torch.Tensor(rays_rgb).to(device)
 
     N_iters = args.epoch + 1
     print("Begin")
@@ -217,9 +250,14 @@ def train():
     # Summary writers
     # writer = SummaryWriter(os.path.join(basedir, 'summaries', expname))
 
-    start = start + 1
+    start += 1
+
+    #! encoder
+    if args.enc_type != "none":
+        assert img_Tensor != None
+        network.encode(img_Tensor[i_fixed], poses[i_fixed], focal)  # TODO
+
     for i in trange(start, N_iters):
-        time0 = time.time()
 
         # Sample random ray batch
         if use_batching:
@@ -243,7 +281,7 @@ def train():
 
             if N_rand is not None:  # 1024
                 rays_o, rays_d = get_rays(
-                    H, W, focal, torch.Tensor(pose)
+                    H, W, focal, torch.Tensor(pose), c
                 )  # (H, W, 3), (H, W, 3)
 
                 if i < args.precrop_iters:  # 500
@@ -278,10 +316,6 @@ def train():
                     select_inds
                 ].long()  # (N_rand, 2) 1024*2 by default
 
-                #! encoder
-                if args.enc_type != "none":
-                    network.encode(target, pose, focal, select_coords, img_i)  # TODO
-
                 rays_o = rays_o[
                     select_coords[:, 0], select_coords[:, 1]
                 ]  # (N_rand, 3). #* the same for all dirs beloning to the same image
@@ -291,6 +325,53 @@ def train():
                     select_coords[:, 0], select_coords[:, 1]
                 ]  # (N_rand, 3) #* color of pixels in original image
 
+        #### TEST ####
+        if i % args.i_testset == 0 and i > 0:
+            testsavedir = os.path.join(basedir, expname, "testset_{:06d}".format(i))
+            os.makedirs(testsavedir, exist_ok=True)
+            print("test poses shape", poses[i_test].shape)
+
+            rgbs, disps = render_path(
+                # torch.Tensor(poses[i_test]).to(device) if type(poses)
+                poses[i_test],
+                hwf,
+                args.chunk,
+                render_kwargs_test,
+                # gt_imgs=images[i_test],
+                savedir=testsavedir,
+            )
+            print("Saved test set")
+
+            img_loss = img2mse(rgbs, images[i_test])
+            # trans = extras["raw"][..., -1]
+            psnr = mse2psnr(img_loss)
+            log = f"[TEST] Iter: {i} Loss: {img_loss.item()}  PSNR: {psnr.item()}\n"
+            print(log)
+
+            # if i % args.i_testset == 0 and i > 0:
+            #     # Turn on testing mode
+            #     with torch.no_grad():
+            #         rgbs, disps = render_path(
+            #             render_poses, hwf, args.chunk, render_kwargs_test
+            #         )
+            rgbs, disps = map(lambda x: x.cpu().numpy(), (rgbs, disps))
+            print("Done, saving", rgbs.shape, disps.shape)
+            moviebase = os.path.join(
+                basedir, expname, "{}_spiral_{:06d}_".format(expname, i)
+            )
+            imageio.mimwrite(moviebase + "rgb.mp4", to8b(rgbs), fps=10, quality=8)
+            imageio.mimwrite(
+                moviebase + "disp.mp4", to8b(disps / np.max(disps)), fps=30, quality=8
+            )
+            if i == args.epoch:
+                break
+
+            # if args.use_viewdirs:
+            #     render_kwargs_test['c2w_staticcam'] = render_poses[0][:3,:4]
+            #     with torch.no_grad():
+            #         rgbs_still, _ = render_path(render_poses, hwf, args.chunk, render_kwargs_test)
+            #     render_kwargs_test['c2w_staticcam'] = None
+            #     imageio.mimwrite(moviebase + 'rgb_still.mp4', to8b(rgbs_still), fps=30, quality=8)
         #####  Core optimization loop  #####
         with profiler.record_function("render"):
             rgb, disp, acc, extras = render(
@@ -334,6 +415,9 @@ def train():
         # Rest is logging
         if i % args.i_weights == 0:
             path = os.path.join(basedir, expname, "{:06d}.tar".format(i))
+            import ipdb
+
+            ipdb.set_trace()
             torch.save(
                 {
                     "global_step": global_step,
@@ -349,43 +433,6 @@ def train():
             )
             print("Saved checkpoints at", path)
 
-        if i % args.i_video == 0 and i > 0:
-            # Turn on testing mode
-            with torch.no_grad():
-                rgbs, disps = render_path(
-                    render_poses, hwf, args.chunk, render_kwargs_test
-                )
-            print("Done, saving", rgbs.shape, disps.shape)
-            moviebase = os.path.join(
-                basedir, expname, "{}_spiral_{:06d}_".format(expname, i)
-            )
-            imageio.mimwrite(moviebase + "rgb.mp4", to8b(rgbs), fps=30, quality=8)
-            imageio.mimwrite(
-                moviebase + "disp.mp4", to8b(disps / np.max(disps)), fps=30, quality=8
-            )
-
-            # if args.use_viewdirs:
-            #     render_kwargs_test['c2w_staticcam'] = render_poses[0][:3,:4]
-            #     with torch.no_grad():
-            #         rgbs_still, _ = render_path(render_poses, hwf, args.chunk, render_kwargs_test)
-            #     render_kwargs_test['c2w_staticcam'] = None
-            #     imageio.mimwrite(moviebase + 'rgb_still.mp4', to8b(rgbs_still), fps=30, quality=8)
-
-        if i % args.i_testset == 0 and i > 0:
-            testsavedir = os.path.join(basedir, expname, "testset_{:06d}".format(i))
-            os.makedirs(testsavedir, exist_ok=True)
-            print("test poses shape", poses[i_test].shape)
-            with torch.no_grad():
-                render_path(
-                    torch.Tensor(poses[i_test]).to(device),
-                    hwf,
-                    args.chunk,
-                    render_kwargs_test,
-                    gt_imgs=images[i_test],
-                    savedir=testsavedir,
-                )
-            print("Saved test set")
-
         gc.collect()
         if i % args.i_print == 0:
             # TODO
@@ -400,6 +447,6 @@ if __name__ == "__main__":
     torch.set_default_tensor_type("torch.cuda.FloatTensor")
 
     # with profiler.profile(profile_memory=True, use_cuda=True) as prof: # memory leak here
-    train()
+    main()
 
     # print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=10))

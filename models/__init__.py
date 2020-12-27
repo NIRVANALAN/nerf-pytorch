@@ -4,7 +4,7 @@ from torch import nn
 import torch.nn.functional as F
 import os
 from .nerf import NeRF
-from .resnetfc import ResnetFC, ResnetCombineFC
+from .resnetfc import ResnetFC
 from .encoder import SpatialEncoder, ImageEncoder
 from util import get_embedder
 import torch.autograd.profiler as profiler
@@ -25,7 +25,12 @@ class NetworkSystem:
             )
 
         self.start = 0
-        self.img_shape = torch.Tensor(img_shape)
+        # Note: this is world -> camera, and bottom row is omitted
+        # self.register_buffer("poses", torch.empty(1, 3, 4), persistent=False)
+        # self.register_buffer("image_shape", torch.empty(2), persistent=False)
+        self.image_shape = torch.Tensor(img_shape)
+        self.poses = torch.empty(1, 3, 4)
+        self.transform_into_viewspace = args.transform_view_spaces
         nerf_net = model_dict[args.arch]
         embed_fn, input_ch = get_embedder(args.multires, args.i_embed)
 
@@ -42,11 +47,16 @@ class NetworkSystem:
         self.pix_prior = None
         if args.enc_type != "none":
             assert args.enc_type in encoder_dict.keys()
-            self.encoder = encoder_dict[args.enc_type]()  # default params
+            self.encoder = encoder_dict[args.enc_type](
+                index_padding=args.index_padding
+            )  # default params
+            print("encoder index padding mode: {}".format(args.index_padding))
             self.stop_encoder_grad = (
                 args.stop_encoder_grad
             )  # Stop ConvNet gradient (freeze weights)
             self.d_latent = self.encoder.latent_size
+        else:
+            self.encoder = None
 
         # self.encoder = make_encoder(conf["encoder"])
         skips = [4]
@@ -147,13 +157,31 @@ class NetworkSystem:
 
         self.render_kwargs_train = render_kwargs_train
         self.render_kwargs_test = render_kwargs_test
+        self.normalize_z = args.normalize_z
 
         # return render_kwargs_train, render_kwargs_test, # start, optimizer
 
     # @staticmethod
+    def transform_coord_system(self, xyz, rot_only=False):
+        """transform cononical world coordinates into view spaces coords system
+
+        Args:
+            xyz (Tensor): cononical coord. 4096 * 3
+        Output:
+            N * 4096 * 3. N=number of input views
+        """
+        xyz_rot = torch.matmul(
+            self.poses[:, None, :3, :3], xyz.reshape(-1, xyz.shape[0], 3, 1)
+        )[
+            ..., 0
+        ]  # N * BS * 3
+        if rot_only:
+            return xyz_rot
+        return xyz_rot + self.poses[:, None, :3, 3], xyz_rot
+
     def run_network(
         self,
-        inputs,
+        inputs,  # 128*32*3
         viewdirs,
         fn,
         embed_fn,
@@ -161,34 +189,66 @@ class NetworkSystem:
         netchunk=1024 * 64,
     ):
         """Prepares inputs and applies network 'fn'."""
-        inputs_flat = torch.reshape(inputs, [-1, inputs.shape[-1]])
-        embedded = embed_fn(inputs_flat)
+        inputs_flat = torch.reshape(inputs, [-1, inputs.shape[-1]])  # 4096*3
+        if self.transform_into_viewspace:
+            # Transform query points into the camera spaces of the input views
+            inputs_flat, inputs_flat_rot = self.transform_coord_system(inputs_flat)
+
+            if self.normalize_z:
+                embedded = embed_fn(inputs_flat_rot)
+            else:
+                embedded = embed_fn(inputs_flat)
+        else:
+            # inputs_flat = inputs_flat.unsqueeze(0)  # align with pix-nerf
+            embedded = embed_fn(inputs_flat)
 
         if viewdirs is not None:
             input_dirs = viewdirs[:, None].expand(inputs.shape)
-            input_dirs_flat = torch.reshape(input_dirs, [-1, input_dirs.shape[-1]])
+            input_dirs_flat = torch.reshape(
+                input_dirs, [-1, input_dirs.shape[-1]]
+            )  # 4096, 3
+
+            if self.transform_into_viewspace:
+                # transform viewdirs into view space
+                input_dirs_flat = self.transform_coord_system(  # N*BS*3
+                    input_dirs_flat, rot_only=True
+                )
+
             embedded_dirs = embeddirs_fn(input_dirs_flat)
             embedded = torch.cat([embedded, embedded_dirs], -1)
 
-        if self.pix_prior is not None:  # TODO
-            with profiler.record_function("reshape latent feature"):
-                pix_prior = self.pix_prior.expand(
-                    -1, inputs.shape[1], -1
-                )  # 1024 * 64 * 512
-                pix_prior = torch.reshape(
-                    pix_prior, [-1, pix_prior.shape[-1]]
-                )  # 65536*512. Cannot use .view() due to not contiguous
+        if self.encoder is not None:  # encode latent code
+            # embedded = torch.repeat_interleave(embedded.unsqueeze(0), self.num_objs, 0)
+            if not self.transform_into_viewspace:
+                inputs_flat, _ = self.transform_coord_system(inputs_flat)
+            uv = -inputs_flat[..., :2] / inputs_flat[..., 2:]  # * [X, -Y, -Z]
 
-                embedded = torch.cat((pix_prior, embedded), dim=-1)
+            if uv.shape[0] == 1 and not self.transform_coord_system:
+                uv = uv.unsqueeze(0)
 
-        with profiler.record_function("batchify inference"):
-            outputs_flat = batchify(fn, netchunk)(embedded)
-            outputs = torch.reshape(
-                outputs_flat, list(inputs.shape[:-1]) + [outputs_flat.shape[-1]]
-            )
+            uv *= self.focal
+            uv += self.c
+
+            latent = self.encoder.index(
+                uv, self.image_shape
+            ).detach()  # ([1, 512, 4096])
+
+            latent = latent.permute(0, 2, 1)  # 2 4096 512
+
+            # latent = torch.reshape(
+            #     latent, [-1, latent.shape[-1]]
+            # )  # 65536*512. Cannot use .view() due to not contiguous
+
+            embedded = torch.cat((latent, embedded), dim=-1)
+
+        # outputs_flat = batchify(fn, netchunk)(embedded)
+        outputs_flat = fn(embedded)  # TODO, memory peak
+        outputs = torch.reshape(
+            outputs_flat, list(inputs.shape[:-1]) + [outputs_flat.shape[-1]]
+        )
         return outputs
 
-    def encode(self, images, poses, focal, select_coords, img_i, c=None):
+    def encode(self, images, poses, focal, c=None):
         """
         :param images (NS, 3, H, W)
         NS is number of input (aka source or reference) views
@@ -198,60 +258,55 @@ class NetworkSystem:
         :param c principal point None or () or (2) or (NS) or (NS, 2) [cx, cy],
         default is center of image
         """
-        with profiler.record_function("encoder"):
-            self.num_objs = images.size(0)
-            if len(images.shape) == 5:  # TODO
-                assert len(poses.shape) == 4
-                assert poses.size(1) == images.size(
-                    1
-                )  # Be consistent with NS = num input views
-                self.num_views_per_obj = images.size(1)
-                images = images.reshape(-1, *images.shape[2:])
-                poses = poses.reshape(-1, 4, 4)
-            else:
-                images = images.permute(2, 0, 1).unsqueeze(0)
-                self.num_views_per_obj = 1
+        # with profiler.record_function("encoder"):
+        self.num_objs = images.size(0)
+        if len(images.shape) == 5:  # multi object input
+            assert len(poses.shape) == 4
+            assert poses.size(1) == images.size(
+                1
+            )  # Be consistent with NS = num input views
+            self.num_views_per_obj = images.size(1)
+            images = images.reshape(-1, *images.shape[2:])
+            poses = poses.reshape(-1, 4, 4)
+        else:
+            self.num_views_per_obj = 1
 
-            with torch.no_grad():  # inference
-                self.encoder(images, img_i)  # memery bank
-                if select_coords.dim() == 2:
-                    select_coords = select_coords.unsqueeze(0)  # BS=1
-                pix_prior = self.encoder.index(select_coords, self.img_shape)
-                self.pix_prior = (
-                    pix_prior.squeeze().permute(1, 0).unsqueeze(1).detach()
-                )  # detach gradient
+        with torch.no_grad():
+            self.encoder(images)  # memery bank
 
-            # * TEST TIME MULTIVIEW INPUT
-            if not self.model.training:
-                rot = poses[:, :3, :3].transpose(1, 2)  # (B, 3, 3)
-                trans = -torch.bmm(rot, poses[:, :3, 3:])  # (B, 3, 1)
-                self.poses = torch.cat((rot, trans), dim=-1)  # (B, 3, 4)
+        # * TEST TIME MULTIVIEW INPUT
+        # if not self.model.training:
+        rot = poses[:, :3, :3].transpose(1, 2)  # (B, 3, 3)
+        trans = -torch.bmm(rot, poses[:, :3, 3:])  # (B, 3, 1)
+        self.poses = torch.cat(
+            (rot, trans), dim=-1
+        )  # (B, 3, 4) #* inverse of original pose. w2c matrix of primary pose(s)
 
-                self.image_shape[0] = images.shape[-1]
-                self.image_shape[1] = images.shape[-2]
+        self.image_shape[0] = images.shape[-1]
+        self.image_shape[1] = images.shape[-2]
 
-                # Handle various focal length/principal point formats
-                # if len(focal.shape) == 0:
-                #     # Scalar: fx = fy = value for all views
-                #     focal = focal[None, None].repeat((1, 2))
-                # elif len(focal.shape) == 1:
-                #     # Vector f: fx = fy = f_i *for view i*
-                #     # Length should match NS (or 1 for broadcast)
-                #     focal = focal.unsqueeze(-1).repeat((1, 2))
-                # # Otherwise, can specify as
-                # focal[..., 1] *= -1.0
-                # self.focal = focal.float()
+        # Handle various focal length/principal point formats
+        if len(focal.shape) == 0:
+            # Scalar: fx = fy = value for all views
+            focal = focal[None, None].repeat((1, 2))
+        elif len(focal.shape) == 1:
+            # Vector f: fx = fy = f_i *for view i*
+            # Length should match NS (or 1 for broadcast)
+            focal = focal.unsqueeze(-1).repeat((1, 2))
+        # Otherwise, can specify as
+        focal[..., 1] *= -1.0
+        self.focal = focal.float()
 
-                if c is None:
-                    # Default principal point is center of image
-                    c = (self.image_shape * 0.5).unsqueeze(0)
-                elif len(c.shape) == 0:
-                    # Scalar: cx = cy = value for all views
-                    c = c[None, None].repeat((1, 2))
-                elif len(c.shape) == 1:
-                    # Vector c: cx = cy = c_i *for view i*
-                    c = c.unsqueeze(-1).repeat((1, 2))
-                self.c = c
+        if c is None:
+            # Default principal point is center of image
+            c = (self.image_shape * 0.5).unsqueeze(0)
+        elif len(c.shape) == 0:
+            # Scalar: cx = cy = value for all views
+            c = c[None, None].repeat((1, 2))
+        elif len(c.shape) == 1:
+            # Vector c: cx = cy = c_i *for view i*
+            c = c.unsqueeze(-1).repeat((1, 2))
+        self.c = c
 
 
 @deprecate

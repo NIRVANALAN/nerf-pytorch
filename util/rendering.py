@@ -146,8 +146,8 @@ def render_rays(
 
 
 def render_path(
-    render_poses, hwf, chunk, render_kwargs, gt_imgs=None, savedir=None, render_factor=0
-):
+    render_poses, hwf, chunk, render_kwargs, savedir=None, render_factor=0
+):  # to optimize. to much gpu memory now
     H, W, focal = hwf
 
     if render_factor != 0:
@@ -160,30 +160,29 @@ def render_path(
     disps = []
 
     t = time.time()
-    for i, c2w in enumerate(tqdm(render_poses)):
-        print(i, time.time() - t)
-        t = time.time()
-        rgb, disp, acc, _ = render(
-            H, W, focal, chunk=chunk, c2w=c2w[:3, :4], **render_kwargs
-        )
-        rgbs.append(rgb.cpu().numpy())
-        disps.append(disp.cpu().numpy())
-        if i == 0:
-            print(rgb.shape, disp.shape)
+    with torch.no_grad():
+        for i, c2w in enumerate(tqdm(render_poses)):
+            rgb, disp, acc, _ = render(
+                H, W, focal, chunk=chunk, c2w=c2w[:3, :4], **render_kwargs
+            )
+            rgbs.append(rgb)
+            disps.append(disp)
+            if i == 0:
+                print(rgb.shape, disp.shape)
 
-        """
-        if gt_imgs is not None and render_factor==0:
-            p = -10. * np.log10(np.mean(np.square(rgb.cpu().numpy() - gt_imgs[i])))
-            print(p)
-        """
+            """
+            if gt_imgs is not None and render_factor==0:
+                p = -10. * np.log10(np.mean(np.square(rgb.cpu().numpy() - gt_imgs[i])))
+                print(p)
+            """
 
-        if savedir is not None:
-            rgb8 = to8b(rgbs[-1])
-            filename = os.path.join(savedir, "{:03d}.png".format(i))
-            imageio.imwrite(filename, rgb8)
+            if savedir is not None:
+                rgb8 = to8b(rgbs[-1])
+                filename = os.path.join(savedir, "{:03d}.png".format(i))
+                imageio.imwrite(filename, rgb8)
 
-    rgbs = np.stack(rgbs, 0)
-    disps = np.stack(disps, 0)
+    rgbs = torch.stack(rgbs, 0)
+    disps = torch.stack(disps, 0)
 
     return rgbs, disps
 

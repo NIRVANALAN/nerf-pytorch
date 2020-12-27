@@ -9,9 +9,16 @@ import numpy as np
 # Misc
 img2mse = lambda x, y: torch.mean((x - y) ** 2)
 mse2psnr = (
-    lambda x: -10.0 * torch.log(x) / torch.log(torch.Tensor([10.0]))
+    lambda x: -10.0
+    * torch.log10(torch.clip(x, 0, 1))
+    # / torch.log(torch.Tensor([10.0]))
 )  # * ln(x) / ln(y) = log_y^x
-to8b = lambda x: (255 * np.clip(x, 0, 1)).astype(np.uint8)
+
+
+def to8b(x):
+    if type(x) is not np.ndarray:
+        x = x.cpu().numpy()
+    return (255 * np.clip(x, 0, 1)).astype(np.uint8)
 
 
 # Positional encoding (section 5.1)
@@ -78,22 +85,67 @@ def get_embedder(multires, i=0):
 
 
 # Ray helpers
-def get_rays(H, W, focal, c2w):
-    i, j = torch.meshgrid(
-        torch.linspace(0, W - 1, W), torch.linspace(0, H - 1, H)
-    )  # pytorch's meshgrid has indexing='ij'
-    i = i.t()
-    j = j.t()
-    dirs = torch.stack(
-        [(i - W * 0.5) / focal, -(j - H * 0.5) / focal, -torch.ones_like(i)], -1
+def unproj_map(width, height, f, c=None):
+    """
+    Get camera unprojection map for given image size.
+    [y,x] of output tensor will contain unit vector of camera ray of that pixel.
+    :param width image width
+    :param height image height
+    :param f focal length, either a number or tensor [fx, fy]
+    :param c principal point, optional, either None or tensor [fx, fy]
+    if not specified uses center of image
+    :return unproj map (height, width, 3)
+    """
+
+    if c is None:
+        c = [width * 0.5, height * 0.5]
+    else:
+        c = c.squeeze()
+
+    if type(f).__module__ == "numpy":
+        f = float(f)
+
+    if isinstance(f, float):
+        f = [f, f]
+    elif len(f.shape) == 0:
+        f = f[None].expand(2)
+    elif len(f.shape) == 1:
+        f = f.expand(2)
+
+    Y, X = torch.meshgrid(
+        torch.arange(height, dtype=torch.float32) - c[1],
+        torch.arange(width, dtype=torch.float32) - c[0],
     )
+    X = X / f[0]  # * normalzied homogeneous coordinates 
+    Y = Y / f[1]
+
+    Z = torch.ones_like(X)
+    unproj = torch.stack((X, -Y, -Z), dim=-1)
+    unproj /= torch.norm(unproj, dim=-1).unsqueeze(-1)  # * normalized unit direction 
+
+    return unproj
+
+
+def get_rays(H, W, focal, c2w, c=None):
+    # i, j = torch.meshgrid(
+    #     torch.linspace(0, W - 1, W), torch.linspace(0, H - 1, H)
+    # )  # pytorch's meshgrid has indexing='ij'
+    # i = i.t()
+    # j = j.t()
+    # dirs = torch.stack(
+    #     [(i - W * 0.5) / focal, -(j - H * 0.5) / focal, -torch.ones_like(i)], -1
+    # )
+
+    dirs = unproj_map(W, H, focal, c)
     # Rotate ray directions from camera frame to the world frame
-    rays_d = torch.sum(
-        dirs[..., np.newaxis, :] * c2w[:3, :3], -1
-    )  # dot product, equals to: [c2w.dot(dir) for dir in dirs]
+
+    # rays_d = torch.sum(dirs[..., np.newaxis, :] * c2w[:3, :3], -1)
+    # dot product, equals to: [c2w.dot(dir) for dir in dirs]
+    rays_d = dirs @ c2w[:3, :3].T
+
     # Translate camera frame's origin to the world frame. It is the origin of all rays.
     rays_o = c2w[:3, -1].expand(rays_d.shape)
-    return rays_o, rays_d
+    return torch.stack((rays_o, rays_d))
 
 
 def get_rays_np(H, W, focal, c2w):  # TODO
