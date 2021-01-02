@@ -50,7 +50,12 @@ class SpatialEncoder(nn.Module):
         self.use_first_pool = use_first_pool
         # norm_layer = util.get_norm_layer(norm_type)
 
-        print("Using torchvision", backbone, "encoder")
+        print(
+            "Using torchvision",
+            backbone,
+            "encoder",
+            "Pretrained: {}".format(pretrained),
+        )
         self.model = getattr(torchvision.models, backbone)(
             pretrained=pretrained,
             # norm_layer=norm_layer

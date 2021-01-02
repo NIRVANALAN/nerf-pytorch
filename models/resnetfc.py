@@ -1,5 +1,6 @@
 import torch
 from torch import nn
+from torch._C import import_ir_module_from_buffer
 import torch.nn.functional as F
 
 #  import torch_scatter
@@ -30,6 +31,8 @@ class ResnetFC(nn.Module):
         use_spade=False,
         use_viewdirs=True,
         viewdirs_res=False,
+        input_views=1,
+        agg_type="cat",
         *args,
         **kwargs
     ):
@@ -46,6 +49,7 @@ class ResnetFC(nn.Module):
         super().__init__()
 
         self.D = D
+        self.agg_type = agg_type
         self.d_latent = d_latent
         self.use_spade = use_spade
         self.input_ch = input_ch
@@ -55,6 +59,8 @@ class ResnetFC(nn.Module):
         self.use_viewdirs = use_viewdirs
         self.viewdirs_res = viewdirs_res
 
+        if self.agg_type == "cat":
+            self.d_latent *= input_views
         # if use_viewdirs: # * True by default
         if viewdirs_res:
             self.lin_in = nn.Linear(input_ch, W)
@@ -74,9 +80,11 @@ class ResnetFC(nn.Module):
 
         self.blocks = nn.ModuleList([ResnetBlockFC(W, beta=beta) for i in range(D)])
 
-        if d_latent != 0:
+        if self.d_latent != 0:
             n_lin_z = min(combine_layer, D)
-            self.lin_z = nn.ModuleList([nn.Linear(d_latent, W) for i in range(n_lin_z)])
+            self.lin_z = nn.ModuleList(
+                [nn.Linear(self.d_latent, W) for i in range(n_lin_z)]
+            )
             for i in range(n_lin_z):
                 nn.init.constant_(self.lin_z[i].bias, 0.0)
                 nn.init.kaiming_normal_(self.lin_z[i].weight, a=0, mode="fan_in")
@@ -338,7 +346,7 @@ class ResnetBlockFC(nn.Module):
             self.shortcut = None
         else:
             self.shortcut = nn.Linear(size_in, size_out, bias=False)
-            nn.init.constant_(self.shortcut.bias, 0.0)
+            # nn.init.constant_(self.shortcut.bias, 0.0)
             nn.init.kaiming_normal_(self.shortcut.weight, a=0, mode="fan_in")
 
     def forward(self, x):
@@ -378,3 +386,143 @@ def combine_interleaved(t, agg_type="average"):
     else:
         raise NotImplementedError("Unsupported combine type " + agg_type)
     return t
+
+
+class ResnetFC_GRL(nn.Module):
+    def __init__(
+        self,
+        D=5,
+        W=512,
+        input_ch=3,
+        input_ch_views=3,
+        output_ch=4,
+        d_latent=0,
+        beta=0.0,
+        agg_layer=4,
+        use_viewdirs=True,
+        viewdirs_res=False,
+        agg_type="att",
+        input_views=1,
+        **kwargs
+    ):
+        """
+        Resnet FC  backbone without multi-view input.
+        Improved version of original nerf net
+        :param D input size
+        :param output_ch output size
+        :param n_blocks number of Resnet blocks
+        :param d_latent latent size, added in each resnet block (0 = disable)
+        :param d_hidden hiddent dimension throughout network
+        :param beta softplus beta, 100 is reasonable; if <=0 uses ReLU activations instead
+        """
+        super().__init__()
+
+        self.D = D
+        self.d_latent = d_latent * input_views
+        self.input_ch = input_ch
+        self.input_ch_views = input_ch_views
+        self.output_ch = output_ch
+        self.W = W
+        self.use_viewdirs = use_viewdirs
+        self.viewdirs_res = viewdirs_res
+
+        if D == agg_layer:
+            dim_out = W + self.d_latent
+        else:
+            dim_out = W
+
+        # if use_viewdirs: # * True by default
+        if viewdirs_res:  # TODO
+            self.lin_in = nn.Linear(input_ch, W)
+            self.feature_linear = nn.Linear(W, W)
+            self.alpha_linear = nn.Linear(W, 1)
+            self.rgb_linear = nn.Linear(W // 2, 3)
+            ### Implementation according to the official code release (https://github.com/bmild/nerf/blob/master/run_nerf_helpers.py#L104-L105)
+            self.views_linears = nn.ModuleList([nn.Linear(input_ch_views + W, W // 2)])
+        else:
+            self.lin_in = nn.Linear(input_ch + input_ch_views, W)
+            self.lin_out = nn.Linear(dim_out, output_ch)
+            nn.init.constant_(self.lin_out.bias, 0.0)
+            nn.init.kaiming_normal_(self.lin_out.weight, a=0, mode="fan_in")
+
+        self.agg_layer = agg_layer
+        # self.use_spade = use_spade
+
+        # TODO self-att module
+        self.agg_module = None
+
+        self.blocks = [ResnetBlockFC(W, beta=beta) for _ in range(agg_layer - 1)]
+        if self.agg_layer < D:
+            self.blocks.insert(
+                self.agg_layer,
+                ResnetBlockFC(size_in=W + self.d_latent, size_out=W, beta=beta),
+            )
+        else:
+            self.blocks.insert(-1, ResnetBlockFC(size_in=W, size_out=W, beta=beta))
+
+        self.blocks = nn.ModuleList(self.blocks)
+
+        self.activation = nn.ReLU()
+
+    def forward(
+        self,
+        xz,
+    ):
+        """
+        :param zx (..., d_latent + d_in)
+        """
+        # with profiler.record_function("resnetfc_infer"):
+        if self.d_latent > 0:
+            z = xz[..., : self.d_latent]
+            h = xz[..., self.d_latent :]
+        else:
+            h = xz
+
+        if self.viewdirs_res:
+            h, input_views = torch.split(
+                h, [self.input_ch, self.input_ch_views], dim=-1
+            )
+
+        # if self.input_ch > 0:
+        h = self.lin_in(h)  #  -> 512
+        # else:
+        #     h = torch.zeros(self.W, device=x.device)  # ? Generative model?
+
+        for i, l in enumerate(self.blocks):
+            if i == self.agg_layer:
+                # h = self.agg_module(h)  # h = 2*B*256
+                h = self.blocks[i](torch.cat([h, z], dim=-1))
+            else:
+                h = self.blocks[i](h)
+
+        if self.viewdirs_res:
+            alpha = self.alpha_linear(h)
+            feature = self.feature_linear(h)
+            h = torch.cat([feature, input_views], -1)
+
+            for i, l in enumerate(self.views_linears):
+                h = self.views_linears[i](h)
+                h = F.relu(h)
+
+            rgb = self.rgb_linear(h)
+            outputs = torch.cat([rgb, alpha], -1)
+        else:
+            if self.agg_layer == self.D:
+                outputs = self.lin_out(torch.cat([h, z], -1))
+            else:
+                outputs = self.lin_out(h)
+        return outputs
+
+    @classmethod
+    def from_conf(cls, conf, d_in, **kwargs):
+        # PyHocon construction
+        return cls(
+            d_in,
+            n_blocks=conf.get_int("n_blocks", 5),
+            d_hidden=conf.get_int("d_hidden", 128),
+            beta=conf.get_float("beta", 0.0),
+            combine_layer=conf.get_int("combine_layer", 3),
+            combine_type=conf.get_string("combine_type", "average"),  # average | max
+            use_spade=conf.get_bool("use_spade", False),
+            **kwargs
+        )

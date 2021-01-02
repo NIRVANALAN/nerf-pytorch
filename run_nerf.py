@@ -1,5 +1,4 @@
 import os
-
 import ipdb
 from opts import config_parser
 import numpy as np
@@ -86,6 +85,8 @@ def main():
     H, W, focal = hwf
     H, W = int(H), int(W)
     hwf = [H, W, focal]
+
+    args.chunk //= len(args.srn_encode_views_id.split())
 
     if args.render_test:
         render_poses = np.array(poses[i_test])
@@ -241,25 +242,25 @@ def main():
         print("done")
         i_batch = 0
 
-    N_iters = args.epoch + 1
     print("Begin")
-    print("TRAIN views are", i_train)
-    print("TEST views are", i_test)
-    print("VAL views are", i_val)  # TODO
+    print("TRAIN views are {}".format(i_train))
+    print("TEST views {}".format(i_test))
+    # print("VAL views are", i_val)  # TODO
 
     # Summary writers
     # writer = SummaryWriter(os.path.join(basedir, 'summaries', expname))
 
-    start += 1
+    if start != args.epoch - 1:  # ease of use in test
+        start += 1
+    for i in trange(start, args.epoch):
 
-    #! encoder
-    if args.enc_type != "none":
-        assert img_Tensor != None
-        network.encode(img_Tensor[i_fixed], poses[i_fixed], focal)  # TODO
-
-    for i in trange(start, N_iters):
+        #! encoder
+        if args.enc_type != "none" and i == start or args.enable_encoder_grad:
+            assert img_Tensor != None
+            network.encode(img_Tensor[i_fixed], poses[i_fixed], focal)  # TODO
 
         # Sample random ray batch
+
         if use_batching:
             # Random over all images
             batch = rays_rgb[i_batch : i_batch + N_rand]  # [B, 2+1, 3*?]
@@ -287,7 +288,7 @@ def main():
                 if i < args.precrop_iters:  # 500
                     dH = int(H // 2 * args.precrop_frac)
                     dW = int(W // 2 * args.precrop_frac)
-                    coords = torch.stack(
+                    coords_ij = torch.stack(
                         torch.meshgrid(
                             torch.linspace(H // 2 - dH, H // 2 + dH - 1, 2 * dH),
                             torch.linspace(W // 2 - dW, W // 2 + dW - 1, 2 * dW),
@@ -299,20 +300,21 @@ def main():
                             f"[Config] Center cropping of size {2*dH} x {2*dW} is enabled until iter {args.precrop_iters}"
                         )
                 else:
-                    coords = torch.stack(
+                    coords_ij = torch.stack(
                         torch.meshgrid(
                             torch.linspace(0, H - 1, H), torch.linspace(0, W - 1, W)
                         ),
                         -1,
-                    )  # (H, W, 2)
+                    )  # stack in 'ij' indexing order. -> (H, W, 2)
 
-                coords = torch.reshape(coords, [-1, 2])  # (H * W, 2)
+                # coords_ij[i,j] = [i,j]
+                coords_ij = torch.reshape(coords_ij, [-1, 2])  # (H * W, 2)
                 select_inds = np.random.choice(
-                    coords.shape[0],
+                    coords_ij.shape[0],
                     size=[N_rand],
                     replace=False,  # select 1024 by default
                 )  # (N_rand,)
-                select_coords = coords[
+                select_coords = coords_ij[
                     select_inds
                 ].long()  # (N_rand, 2) 1024*2 by default
 
@@ -326,7 +328,7 @@ def main():
                 ]  # (N_rand, 3) #* color of pixels in original image
 
         #### TEST ####
-        if i % args.i_testset == 0 and i > 0:
+        if i > 1 and (i % args.i_testset == 1 or i + 1 == args.epoch):
             testsavedir = os.path.join(basedir, expname, "testset_{:06d}".format(i))
             os.makedirs(testsavedir, exist_ok=True)
             print("test poses shape", poses[i_test].shape)
@@ -342,11 +344,17 @@ def main():
             )
             print("Saved test set")
 
-            img_loss = img2mse(rgbs, images[i_test])
+            img_loss = img2mse(rgbs, images[i_test], keepdims=True)
             # trans = extras["raw"][..., -1]
             psnr = mse2psnr(img_loss)
-            log = f"[TEST] Iter: {i} Loss: {img_loss.item()}  PSNR: {psnr.item()}\n"
+            np.save(
+                os.path.join(basedir, expname, "test_psnr_epoch_{:06d}".format(i)),
+                psnr.cpu().numpy(),
+            )
+            log = f"[TEST] Iter: {i} Loss: {img_loss.mean().item()}  PSNR: {psnr.mean().item()}\n"
             print(log)
+            with open(output_f, "a") as f:
+                f.write(log)
 
             # if i % args.i_testset == 0 and i > 0:
             #     # Turn on testing mode
@@ -408,16 +416,9 @@ def main():
             param_group["lr"] = new_lrate
         ################################
 
-        # dt = time.time() - time0
-        # print(f"Step: {global_step}, Loss: {loss}, Time: {dt}")
-        #####           end            #####
-
         # Rest is logging
-        if i % args.i_weights == 0:
+        if i > 1 and (i % args.i_weights == 1 or i == args.epoch - 1):
             path = os.path.join(basedir, expname, "{:06d}.tar".format(i))
-            import ipdb
-
-            ipdb.set_trace()
             torch.save(
                 {
                     "global_step": global_step,

@@ -232,7 +232,7 @@ def config_parser():
         "--i_weights", type=int, default=10000, help="frequency of weight ckpt saving"
     )
     parser.add_argument(
-        "--i_testset", type=int, default=50000, help="frequency of testset saving"
+        "--i_testset", type=int, default=5000, help="frequency of testset saving"
     )
     parser.add_argument(
         "--i_video",
@@ -261,9 +261,9 @@ def config_parser():
         help="Whether to use uncoder & the type of encoder",
     )
     parser.add_argument(
-        "--stop_encoder_grad",
+        "--enable_encoder_grad",
         action="store_true",
-        help="whether to freeze encooder gradient",
+        help="whether to update encooder gradient",
     )
     parser.add_argument(
         "--use_spade",
@@ -287,6 +287,7 @@ def config_parser():
     parser.add_argument(
         "--srn_test_idx_interv", type=int, default=2, help="test some ids"
     )
+    parser.add_argument("--agg_layer", type=int, default=3, help="agg_layer")
     parser.add_argument(
         "--normalize_z", action="store_true", help="Whether to shift z into origin"
     )
@@ -298,6 +299,16 @@ def config_parser():
 
     parser.add_argument(
         "--index_padding", type=str, default="border", help="grid_sample() padding mode"
+    )
+    parser.add_argument(
+        "--encoder_no_pretrain", action="store_true", help="random init encoder"
+    )
+    parser.add_argument(
+        "--agg_type", type=str, default="", help="how to agg the features"
+    )
+
+    parser.add_argument(
+        "--encode_test", action="store_true", help="Whether to condition on test views"
     )
 
     return parser

@@ -65,8 +65,8 @@ class SRNDataset(torch.utils.data.Dataset):
     def __getitem__(self, index):
         intrin_path = self.intrins[index]
         dir_path = os.path.dirname(intrin_path)
-        rgb_paths = sorted(glob.glob(os.path.join(dir_path, "rgb", "*")))
-        pose_paths = sorted(glob.glob(os.path.join(dir_path, "pose", "*")))
+        rgb_paths = sorted(glob.glob(os.path.join(dir_path, "rgb", "*.png")))
+        pose_paths = sorted(glob.glob(os.path.join(dir_path, "pose", "*.txt")))
 
         assert len(rgb_paths) == len(pose_paths)
 
@@ -122,13 +122,16 @@ class SRNDataset(torch.utils.data.Dataset):
         all_bboxes = torch.stack(all_bboxes)
 
         if all_imgs.shape[1:3] != self.image_size:
-            scale = self.image_size[0] / all_imgs.shape[-2]
-            focal *= scale
-            cx *= scale
-            cy *= scale
-            all_bboxes *= scale
+            if scale == 1:  # hasn't been modified yet
+                scale = self.image_size[0] / all_imgs.shape[-2]
+                focal *= scale
+                cx *= scale
+                cy *= scale
+                all_bboxes *= scale
 
-            all_imgs = F.interpolate(all_imgs, size=self.image_size, mode="area")
+            all_imgs = F.interpolate(
+                all_imgs.permute(0, 3, 1, 2), size=self.image_size, mode="area"
+            ).permute(0, 2, 3, 1)
             all_masks = F.interpolate(all_masks, size=self.image_size, mode="area")
 
         if self.world_scale != 1.0:
@@ -143,7 +146,7 @@ class SRNDataset(torch.utils.data.Dataset):
             "img_id": index,
             "focal": focal,
             "c": torch.tensor([cx, cy], dtype=torch.float32),
-            "images": all_imgs,  # 250  * 128 * 128 * 3
+            "images": all_imgs,  # 250  3 * 128 * 128
             # "images_tensor": all_imgs_tensor.permute(
             #     0, 2, 3, 1
             # ),  # 250  * 128 * 128 * 3

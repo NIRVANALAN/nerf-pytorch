@@ -1,4 +1,5 @@
 import torch
+from torch._C import import_ir_module_from_buffer
 
 torch.autograd.set_detect_anomaly(True)
 import torch.nn as nn
@@ -7,7 +8,13 @@ import numpy as np
 
 
 # Misc
-img2mse = lambda x, y: torch.mean((x - y) ** 2)
+
+
+img2mse = (
+    lambda x, y, keepdims=False: torch.mean((x - y) ** 2, dim=(-3, -2, -1))
+    if keepdims
+    else torch.mean((x - y) ** 2)
+)
 mse2psnr = (
     lambda x: -10.0
     * torch.log10(torch.clip(x, 0, 1))
@@ -112,16 +119,16 @@ def unproj_map(width, height, f, c=None):
     elif len(f.shape) == 1:
         f = f.expand(2)
 
-    Y, X = torch.meshgrid(
+    Y, X = torch.meshgrid(  # pytorch meshgrid returns H*W*2 grid
         torch.arange(height, dtype=torch.float32) - c[1],
         torch.arange(width, dtype=torch.float32) - c[0],
-    )
-    X = X / f[0]  # * normalzied homogeneous coordinates 
+    )  # pytorch's meshgrid has indexing='ij'. return Cartesian 'xy' indexing here, so swap the order of H and W here.
+    X = X / f[0]  # * normalzied homogeneous coordinates
     Y = Y / f[1]
 
     Z = torch.ones_like(X)
     unproj = torch.stack((X, -Y, -Z), dim=-1)
-    unproj /= torch.norm(unproj, dim=-1).unsqueeze(-1)  # * normalized unit direction 
+    unproj /= torch.norm(unproj, dim=-1).unsqueeze(-1)  # * normalized unit direction
 
     return unproj
 
@@ -129,7 +136,7 @@ def unproj_map(width, height, f, c=None):
 def get_rays(H, W, focal, c2w, c=None):
     # i, j = torch.meshgrid(
     #     torch.linspace(0, W - 1, W), torch.linspace(0, H - 1, H)
-    # )  # pytorch's meshgrid has indexing='ij'
+    # w  # pytorch's meshgrid has indexing='ij'
     # i = i.t()
     # j = j.t()
     # dirs = torch.stack(

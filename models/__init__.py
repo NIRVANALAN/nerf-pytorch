@@ -4,13 +4,17 @@ from torch import nn
 import torch.nn.functional as F
 import os
 from .nerf import NeRF
-from .resnetfc import ResnetFC
+from .resnetfc import ResnetFC, ResnetFC_GRL
 from .encoder import SpatialEncoder, ImageEncoder
 from util import get_embedder
 import torch.autograd.profiler as profiler
+import ipdb
 
-model_dict = {"nerf": NeRF, "resnetFC": ResnetFC}
-encoder_dict = {"spatial": SpatialEncoder, "global": ImageEncoder}
+model_dict = {"nerf": NeRF, "resnetFC": ResnetFC, "resnetGRL": ResnetFC_GRL}
+encoder_dict = {
+    "spatial": SpatialEncoder,
+    "global": ImageEncoder,
+}
 
 
 class NetworkSystem:
@@ -48,12 +52,13 @@ class NetworkSystem:
         if args.enc_type != "none":
             assert args.enc_type in encoder_dict.keys()
             self.encoder = encoder_dict[args.enc_type](
-                index_padding=args.index_padding
+                index_padding=args.index_padding,
+                pretrained=not args.encoder_no_pretrain,
             )  # default params
             print("encoder index padding mode: {}".format(args.index_padding))
-            self.stop_encoder_grad = (
-                args.stop_encoder_grad
-            )  # Stop ConvNet gradient (freeze weights)
+            self.enable_encoder_grad = (
+                args.enable_encoder_grad
+            )  # update ConvNet gradient (not freeze weights)
             self.d_latent = self.encoder.latent_size
         else:
             self.encoder = None
@@ -70,6 +75,9 @@ class NetworkSystem:
             use_viewdirs=args.use_viewdirs,
             viewdirs_res=args.viewdirs_res,
             d_latent=self.d_latent,
+            input_views=len(args.srn_encode_views_id.split()),
+            agg_layer=args.agg_layer,
+            agg_type=args.agg_type,
         ).to(device)
 
         print(self.model)
@@ -88,8 +96,13 @@ class NetworkSystem:
                 use_viewdirs=args.use_viewdirs,
                 viewdirs_res=args.viewdirs_res,
                 d_latent=self.d_latent,
+                input_views=len(args.srn_encode_views_id.split()),
+                agg_layer=args.agg_layer,
+                agg_type=args.agg_type,
             ).to(device)
             grad_vars += list(self.model_fine.parameters())
+
+            print(self.model_fine)
 
         # Create optimizer, load model
         self.optimizer = torch.optim.Adam(
@@ -158,11 +171,12 @@ class NetworkSystem:
         self.render_kwargs_train = render_kwargs_train
         self.render_kwargs_test = render_kwargs_test
         self.normalize_z = args.normalize_z
+        self.agg_type = args.agg_type
 
         # return render_kwargs_train, render_kwargs_test, # start, optimizer
 
     # @staticmethod
-    def transform_coord_system(self, xyz, rot_only=False):
+    def transform_view_space(self, xyz, poses=None, return_rot=False):
         """transform cononical world coordinates into view spaces coords system
 
         Args:
@@ -170,14 +184,16 @@ class NetworkSystem:
         Output:
             N * 4096 * 3. N=number of input views
         """
+        if poses == None:
+            poses = self.poses
         xyz_rot = torch.matmul(
-            self.poses[:, None, :3, :3], xyz.reshape(-1, xyz.shape[0], 3, 1)
+            poses[:, None, :3, :3], xyz.reshape(-1, xyz.shape[0], 3, 1)
         )[
             ..., 0
         ]  # N * BS * 3
-        if rot_only:
+        if return_rot:
             return xyz_rot
-        return xyz_rot + self.poses[:, None, :3, 3], xyz_rot
+        return xyz_rot + poses[:, None, :3, 3]
 
     def run_network(
         self,
@@ -190,17 +206,24 @@ class NetworkSystem:
     ):
         """Prepares inputs and applies network 'fn'."""
         inputs_flat = torch.reshape(inputs, [-1, inputs.shape[-1]])  # 4096*3
+
+        ###
+        # view_space_inputs_flat = self.transform_view_space(inputs_flat)
+        # homo_coord_viewspace = torch.cat(
+        #     [view_space_inputs_flat, torch.ones(1, view_space_inputs_flat.shape[1], 1)],
+        #     -1,
+        # )
+        # back_inputs = self.transform_view_space(view_space_inputs_flat, poses=self.c2w)
+        ###
+
         if self.transform_into_viewspace:
             # Transform query points into the camera spaces of the input views
-            inputs_flat, inputs_flat_rot = self.transform_coord_system(inputs_flat)
-
             if self.normalize_z:
-                embedded = embed_fn(inputs_flat_rot)
+                inputs_flat = self.transform_view_space(inputs_flat, return_rot=True)
             else:
-                embedded = embed_fn(inputs_flat)
-        else:
+                inputs_flat = self.transform_view_space(inputs_flat, return_rot=False)
             # inputs_flat = inputs_flat.unsqueeze(0)  # align with pix-nerf
-            embedded = embed_fn(inputs_flat)
+        embedded = embed_fn(inputs_flat)
 
         if viewdirs is not None:
             input_dirs = viewdirs[:, None].expand(inputs.shape)
@@ -210,24 +233,27 @@ class NetworkSystem:
 
             if self.transform_into_viewspace:
                 # transform viewdirs into view space
-                input_dirs_flat = self.transform_coord_system(  # N*BS*3
-                    input_dirs_flat, rot_only=True
-                )
+                input_dirs_flat = self.transform_view_space(input_dirs_flat)  # N*BS*3
 
             embedded_dirs = embeddirs_fn(input_dirs_flat)
             embedded = torch.cat([embedded, embedded_dirs], -1)
 
         if self.encoder is not None:  # encode latent code
             # embedded = torch.repeat_interleave(embedded.unsqueeze(0), self.num_objs, 0)
+
             if not self.transform_into_viewspace:
-                inputs_flat, _ = self.transform_coord_system(inputs_flat)
+                inputs_flat = self.transform_view_space(inputs_flat)
             uv = -inputs_flat[..., :2] / inputs_flat[..., 2:]  # * [X, -Y, -Z]
 
-            if uv.shape[0] == 1 and not self.transform_coord_system:
+            if uv.shape[0] == 1 and not self.transform_view_space:
                 uv = uv.unsqueeze(0)
 
             uv *= self.focal
             uv += self.c
+
+            ### IMPORTANT: transform uv from Cartisian indexing into 'ij' indexing ###
+            uv = torch.flip(uv, [-1])
+            ### IMPORTANT ###
 
             latent = self.encoder.index(
                 uv, self.image_shape
@@ -239,15 +265,29 @@ class NetworkSystem:
             #     latent, [-1, latent.shape[-1]]
             # )  # 65536*512. Cannot use .view() due to not contiguous
 
+            if embedded.dim() != latent.dim():
+                embedded = embedded.unsqueeze(0)
+
+            if latent.size(0) != 1:
+                if self.agg_type == "cat":
+                    latent = latent.permute(1, 2, 0).reshape(
+                        (1, latent.shape[1], -1)
+                    )  # merge the two feature dimension
+                elif self.agg_type == "avg":
+                    latent = latent.mean(dim=0, keepdim=True)
+                else:  # default
+                    pass
+
             embedded = torch.cat((latent, embedded), dim=-1)
 
-        # outputs_flat = batchify(fn, netchunk)(embedded)
-        outputs_flat = fn(embedded)  # TODO, memory peak
+        outputs_flat = batchify(fn, netchunk)(embedded)
+        # outputs_flat = fn(embedded)  # TODO, memory peak
         outputs = torch.reshape(
             outputs_flat, list(inputs.shape[:-1]) + [outputs_flat.shape[-1]]
         )
         return outputs
 
+    #
     def encode(self, images, poses, focal, c=None):
         """
         :param images (NS, 3, H, W)
@@ -271,11 +311,15 @@ class NetworkSystem:
         else:
             self.num_views_per_obj = 1
 
-        with torch.no_grad():
+        if self.enable_encoder_grad:
             self.encoder(images)  # memery bank
+        else:
+            with torch.no_grad():  # todo
+                self.encoder(images)  # memery bank
 
         # * TEST TIME MULTIVIEW INPUT
         # if not self.model.training:
+        self.c2w = poses
         rot = poses[:, :3, :3].transpose(1, 2)  # (B, 3, 3)
         trans = -torch.bmm(rot, poses[:, :3, 3:])  # (B, 3, 1)
         self.poses = torch.cat(
@@ -312,7 +356,7 @@ class NetworkSystem:
 @deprecate
 def create_model(args, device):
     """Instantiate NeRF's MLP model."""
-    model_dict = {"nerf": NeRF, "resnetFC": ResnetFC}
+    model_dict = {"nerf": NeRF, "resnetFC": ResnetFC_GRL}
     if args.arch not in model_dict:
         raise NotImplementedError(
             "no {} architecture found. Please select in {}".format(

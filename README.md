@@ -159,3 +159,7 @@ However, if you find this implementation or pre-trained models helpful, please c
   year={2020}
 }
 ```
+
+
+# TODO
+1. model trainig. modify ```i``` in the training loop

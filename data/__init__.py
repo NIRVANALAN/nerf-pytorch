@@ -23,12 +23,15 @@ def create_dataset(args):
         views_avai = instance[0]["images"].shape[0]
         test_views_avai = instance[-1]["images"].shape[0]
 
-        if args.srn_input_views <= 2:
-            input_views_ids = list(map(int, args.srn_input_views_id.split()))
+        if len(args.srn_input_views_id.split()) > 1:
+            # if len(list(map(int, args.srn_input_views_id.split())))
+            # if args.srn_input_views <= 2:
+            input_views_ids = np.array(list(map(int, args.srn_input_views_id.split())))
         else:
-            input_views_ids = list(range(views_avai))[
-                :: views_avai // args.srn_input_views
-            ]
+            input_views_ids = np.linspace(
+                0, views_avai, args.srn_input_views, False, dtype=int
+            )
+        # np.array(range(views_avai)) [ :: views_avai // args.srn_input_views ]
 
         # extend fixed encode views
         # if args.enc_type != 'none' :
@@ -36,11 +39,9 @@ def create_dataset(args):
         #     for enc_id in encode_view_ids:
         #         if enc_id not in input_views_ids:
         #             input_views_ids.extend(encode_view_ids)
-        input_views_ids = np.array(input_views_ids)
+        # input_views_ids = np.array(input_views_ids)
 
-        test_views = np.linspace(
-            1, test_views_avai, test_views_avai // 1, False, dtype=int
-        )
+        test_views = np.linspace(1, test_views_avai, test_views_avai, False, dtype=int)
         # np.random.choice(np.arange(views_avai), size=args.srn_input_views)
         # input_views_id = (0, 38)  # try input views id = [0, 38]
 
