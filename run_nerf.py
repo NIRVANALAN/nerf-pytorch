@@ -1,10 +1,11 @@
 import os
 import ipdb
-from opts import config_parser
+from options.opts import config_parser
 import numpy as np
 import imageio
 import time
 import torch
+from torchvision.utils import save_image
 from tqdm import tqdm, trange
 import trimesh
 import mcubes
@@ -15,11 +16,13 @@ from util import *
 
 from models import *
 from data import create_dataset
-import gc
+
+from torch.utils.tensorboard import SummaryWriter
 
 torch.set_default_tensor_type("torch.cuda.FloatTensor")
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 np.random.seed(0)
+
 
 # print = lambda x: print(*x, flush=True)
 
@@ -79,6 +82,9 @@ def main():
         data,
         img_Tensor,
         i_fixed,
+        i_fixed_test,
+        decoder_imgs,
+        decoder_imgs_normalized,
     ) = create_dataset(args)
 
     # Cast intrinsics to right types
@@ -95,9 +101,14 @@ def main():
     basedir = args.basedir
     expname = args.expname
     os.makedirs(os.path.join(basedir, expname), exist_ok=True)
-    output_f = os.path.join(basedir, expname, "log.txt")
-    with open(output_f, "a") as train_log:
-        train_log.write("training log")
+    if args.add_decoder:
+        os.makedirs(os.path.join(basedir, expname, "AE"), exist_ok=True)
+    # output_f = os.path.join(basedir, expname, "log.txt")
+    # with open(output_f, "a") as train_log:
+    #     train_log.write("training log")
+
+    # Summary writers
+    writer = SummaryWriter(os.path.join(basedir, "summaries", expname))
 
     f = os.path.join(basedir, expname, "args.txt")
     with open(f, "w") as file:
@@ -231,7 +242,7 @@ def main():
         rays_rgb = rays_rgb.view(-1, 3, 3)
         # rays_rgb = torch.reshape(rays_rgb, [-1, 3, 3])  # [(N-1)*H*W, ro+rd+rgb, 3]
 
-        print("shuffle rays")
+        # print("shuffle rays")
         # rays_rgb = rays_rgb.astype(np.float32)
         # np.random.shuffle(rays_rgb) # * shuffle along the first axis
         rays_rgb = rays_rgb[torch.randperm(rays_rgb.size(0))]
@@ -244,24 +255,45 @@ def main():
 
     print("Begin")
     print("TRAIN views are {}".format(i_train))
-    print("TEST views {}".format(i_test))
+    print("TEST views number: {}".format(len(i_test)))
     # print("VAL views are", i_val)  # TODO
 
-    # Summary writers
-    # writer = SummaryWriter(os.path.join(basedir, 'summaries', expname))
+    # coord_ij for later use
+    coord_cartesian = {
+        "regular": cartesian_coord(H, W, reshape=True),
+        "precrop": cartesian_coord(H, W, precrop_frac=args.precrop_frac, reshape=True),
+    }
 
     if start != args.epoch - 1:  # ease of use in test
         start += 1
+
+    if args.add_decoder:
+        criterion_ae = nn.MSELoss()
+
     for i in trange(start, args.epoch):
 
         #! encoder
-        if args.enc_type != "none" and i == start or args.enable_encoder_grad:
+        if args.enc_type != "none" and (i == start or (i % args.encoder_interv == 1)):
             assert img_Tensor != None
             network.encode(img_Tensor[i_fixed], poses[i_fixed], focal)  # TODO
 
-        # Sample random ray batch
+        #! AE
+        if args.add_decoder:
 
-        if use_batching:
+            img_i_ae = np.random.choice(
+                decoder_imgs_normalized.shape[0], size=args.ae_batch
+            )
+            img_ae = decoder_imgs_normalized[img_i_ae].cuda()
+            img_ae_gt = decoder_imgs[img_i_ae].cuda()
+            # ===================forward=====================
+            output_ae = network.encoder(img_ae, encode=False)[..., :3]
+            ae_loss = img2mse(output_ae, img_ae_gt)
+            psnr_ae = mse2psnr(ae_loss)
+            writer.add_scalar("Loss_AE/train", ae_loss.item(), i)
+            writer.add_scalar("PSNR_AE/train", psnr_ae.item(), i)
+
+        # Sample random ray batch
+        if use_batching:  # by default
             # Random over all images
             batch = rays_rgb[i_batch : i_batch + N_rand]  # [B, 2+1, 3*?]
             batch = torch.transpose(batch, 0, 1)
@@ -269,7 +301,7 @@ def main():
 
             i_batch += N_rand
             if i_batch >= rays_rgb.shape[0]:
-                print("Shuffle data after an epoch!")
+                # print("Shuffle data after an epoch!")
                 rand_idx = torch.randperm(rays_rgb.shape[0])
                 rays_rgb = rays_rgb[rand_idx]
                 i_batch = 0
@@ -286,29 +318,14 @@ def main():
                 )  # (H, W, 3), (H, W, 3)
 
                 if i < args.precrop_iters:  # 500
-                    dH = int(H // 2 * args.precrop_frac)
-                    dW = int(W // 2 * args.precrop_frac)
-                    coords_ij = torch.stack(
-                        torch.meshgrid(
-                            torch.linspace(H // 2 - dH, H // 2 + dH - 1, 2 * dH),
-                            torch.linspace(W // 2 - dW, W // 2 + dW - 1, 2 * dW),
-                        ),
-                        -1,
-                    )
+                    coords_ij = coord_cartesian["precrop"]
                     if i == start:
                         print(
-                            f"[Config] Center cropping of size {2*dH} x {2*dW} is enabled until iter {args.precrop_iters}"
+                            f"[Config] Center cropping is enabled until iter {args.precrop_iters}"
                         )
                 else:
-                    coords_ij = torch.stack(
-                        torch.meshgrid(
-                            torch.linspace(0, H - 1, H), torch.linspace(0, W - 1, W)
-                        ),
-                        -1,
-                    )  # stack in 'ij' indexing order. -> (H, W, 2)
+                    coords_ij = coord_cartesian["regular"]
 
-                # coords_ij[i,j] = [i,j]
-                coords_ij = torch.reshape(coords_ij, [-1, 2])  # (H * W, 2)
                 select_inds = np.random.choice(
                     coords_ij.shape[0],
                     size=[N_rand],
@@ -333,6 +350,11 @@ def main():
             os.makedirs(testsavedir, exist_ok=True)
             print("test poses shape", poses[i_test].shape)
 
+            # encode on test_set
+
+            if args.enc_type != "none" and args.encode_test_views:
+                network.encode(img_Tensor[i_fixed], poses[i_fixed], focal)  # TODO
+
             rgbs, disps = render_path(
                 # torch.Tensor(poses[i_test]).to(device) if type(poses)
                 poses[i_test],
@@ -353,8 +375,10 @@ def main():
             )
             log = f"[TEST] Iter: {i} Loss: {img_loss.mean().item()}  PSNR: {psnr.mean().item()}\n"
             print(log)
-            with open(output_f, "a") as f:
-                f.write(log)
+
+            writer.add_scalar("Loss/Test", img_loss.mean().item(), i)
+            writer.add_scalar("PSNR/Test", psnr.mean().item(), i)
+            writer.add_images("test_images", rgbs[:5].permute(0, 3, 1, 2), i)
 
             # if i % args.i_testset == 0 and i > 0:
             #     # Turn on testing mode
@@ -381,23 +405,24 @@ def main():
             #     render_kwargs_test['c2w_staticcam'] = None
             #     imageio.mimwrite(moviebase + 'rgb_still.mp4', to8b(rgbs_still), fps=30, quality=8)
         #####  Core optimization loop  #####
-        with profiler.record_function("render"):
-            rgb, disp, acc, extras = render(
-                H,
-                W,
-                focal,
-                chunk=args.chunk,
-                rays=batch_rays,
-                verbose=i < 10,
-                retraw=True,
-                **render_kwargs_train,
-            )
+        rgb, disp, acc, extras = render(
+            H,
+            W,
+            focal,
+            chunk=args.chunk,
+            rays=batch_rays,
+            verbose=i < 10,
+            retraw=True,
+            **render_kwargs_train,
+        )
 
         optimizer.zero_grad()
         img_loss = img2mse(rgb, target_s)
         # trans = extras["raw"][..., -1]
-        loss = img_loss
         psnr = mse2psnr(img_loss)
+        loss = img_loss
+        if args.add_decoder:
+            loss += args.ae_lambda * ae_loss
 
         if "rgb0" in extras:
             img_loss0 = img2mse(extras["rgb0"], target_s)
@@ -406,6 +431,10 @@ def main():
 
         loss.backward()
         optimizer.step()
+
+        # NOTE Writing log to tensorboard
+        writer.add_scalar("Loss/Train", img_loss.item(), i)
+        writer.add_scalar("PSNR/Train", psnr.item(), i)
 
         # NOTE: IMPORTANT!
         ###   update learning rate   ###
@@ -429,19 +458,28 @@ def main():
                         "network_fine"
                     ].state_dict(),
                     "optimizer_state_dict": optimizer.state_dict(),
+                    "encoder": network.encoder.state_dict()
+                    if network.encoder is not None
+                    else None,
                 },
                 path,
             )
             print("Saved checkpoints at", path)
+        # save image
+        if args.add_decoder and (i % args.i_img == 0):
+            pic = to_img(
+                output_ae.detach().cpu(),
+                img_size=img_ae.shape[2],
+                channel=img_ae.shape[1],
+            )
+            save_image(
+                pic, os.path.join(basedir, expname, "AE", "iter_{}.png".format(i))
+            )
+            writer.add_images("test_AE_images", pic[:5], i)
 
-        gc.collect()
-        if i % args.i_print == 0:
-            # TODO
-            log = f"[TRAIN] Iter: {i} Loss: {loss.item()}  PSNR: {psnr.item()}\n"
-            tqdm.write(log)
-            with open(output_f, "a") as f:
-                f.write(log)
         global_step += 1
+
+    writer.close()
 
 
 if __name__ == "__main__":

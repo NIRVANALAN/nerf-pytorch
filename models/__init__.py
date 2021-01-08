@@ -44,24 +44,10 @@ class NetworkSystem:
             embeddirs_fn, input_ch_views = get_embedder(
                 args.multires_views, args.i_embed
             )
-        output_ch = 5 if args.N_importance > 0 else 4  # *
+        output_ch = 5 if args.N_importance > 0 else 4
         # * create encoder
 
-        self.d_latent = 0
-        self.pix_prior = None
-        if args.enc_type != "none":
-            assert args.enc_type in encoder_dict.keys()
-            self.encoder = encoder_dict[args.enc_type](
-                index_padding=args.index_padding,
-                pretrained=not args.encoder_no_pretrain,
-            )  # default params
-            print("encoder index padding mode: {}".format(args.index_padding))
-            self.enable_encoder_grad = (
-                args.enable_encoder_grad
-            )  # update ConvNet gradient (not freeze weights)
-            self.d_latent = self.encoder.latent_size
-        else:
-            self.encoder = None
+        self.d_latent = 512 if args.enc_type != "none" else 0
 
         # self.encoder = make_encoder(conf["encoder"])
         skips = [4]
@@ -78,9 +64,10 @@ class NetworkSystem:
             input_views=len(args.srn_encode_views_id.split()),
             agg_layer=args.agg_layer,
             agg_type=args.agg_type,
+            use_spade=args.use_spade,
         ).to(device)
 
-        print(self.model)
+        # print(self.model)
 
         grad_vars = list(self.model.parameters())
 
@@ -99,10 +86,33 @@ class NetworkSystem:
                 input_views=len(args.srn_encode_views_id.split()),
                 agg_layer=args.agg_layer,
                 agg_type=args.agg_type,
+                use_spade=args.use_spade,
             ).to(device)
             grad_vars += list(self.model_fine.parameters())
 
             print(self.model_fine)
+
+        # define encoder
+        if args.enc_type != "none":
+            assert args.enc_type in encoder_dict.keys()
+            self.encoder = encoder_dict[args.enc_type](
+                index_padding=args.index_padding,
+                pretrained=not args.encoder_no_pretrain,
+                add_decoder=args.add_decoder,
+                mlp_render_net=self.model_fine.decoder_blks
+                if args.mlp_render
+                else None,  # TODO
+            )  # default params
+            print("encoder index padding mode: {}".format(args.index_padding))
+            self.enable_encoder_grad = (
+                args.enable_encoder_grad
+            )  # update ConvNet gradient (not freeze weights)
+            # self.d_latent = self.encoder.latent_size
+        else:
+            self.encoder = None
+        # add parameters of Encoder if needed
+        if args.add_decoder:  # TODO
+            grad_vars += list(self.encoder.parameters())
 
         # Create optimizer, load model
         self.optimizer = torch.optim.Adam(

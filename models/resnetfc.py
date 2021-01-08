@@ -1,3 +1,4 @@
+from socket import IP_DROP_MEMBERSHIP
 import torch
 from torch import nn
 from torch._C import import_ir_module_from_buffer
@@ -58,6 +59,7 @@ class ResnetFC(nn.Module):
         self.W = W
         self.use_viewdirs = use_viewdirs
         self.viewdirs_res = viewdirs_res
+        print("using spade: {}".format(self.use_spade))
 
         if self.agg_type == "cat":
             self.d_latent *= input_views
@@ -78,7 +80,17 @@ class ResnetFC(nn.Module):
         self.combine_layer = combine_layer
         # self.use_spade = use_spade
 
-        self.blocks = nn.ModuleList([ResnetBlockFC(W, beta=beta) for i in range(D)])
+        self.encoder_blks = nn.ModuleList(
+            [ResnetBlockFC(W, beta=beta) for _ in range(combine_layer)]
+        )
+        self.decoder_blks = nn.ModuleList(
+            [
+                nn.Sequential(
+                    *[ResnetBlockFC(W, beta=beta) for _ in range(D - combine_layer)]
+                )
+            ]
+            + [self.lin_out]
+        )
 
         if self.d_latent != 0:
             n_lin_z = min(combine_layer, D)
@@ -126,7 +138,7 @@ class ResnetFC(nn.Module):
         # else:
         #     h = torch.zeros(self.W, device=x.device)  # ? Generative model?
 
-        for i, l in enumerate(self.blocks):
+        for i, l in enumerate(self.encoder_blks):
             if self.d_latent > 0 and i < self.combine_layer:
                 if self.use_spade:
                     h = self.scale_z[i](z) * h + self.lin_z[i](z)
@@ -135,7 +147,14 @@ class ResnetFC(nn.Module):
             elif i == self.combine_layer:
                 h = combine_interleaved(h, agg_type="average")  # h = 2*B*256
 
-            h = self.blocks[i](h)
+            h = self.encoder_blks[i](h)
+
+        # combine
+        h = combine_interleaved(h, agg_type="average")  # h = 2*B*256
+
+        # treat the remaining REBLKS as as decoder
+        for i, l in enumerate(self.decoder_blks[:-1]):  # remove lin_out
+            h = self.decoder_blks[i](h)
 
         if self.viewdirs_res:
             alpha = self.alpha_linear(h)
@@ -149,7 +168,18 @@ class ResnetFC(nn.Module):
             rgb = self.rgb_linear(h)
             outputs = torch.cat([rgb, alpha], -1)
         else:
-            outputs = self.lin_out(h)
+            # if h.dim() == 4:
+            #     spatial = True
+            #     B, C, H, W = h.shape[:]
+            #     x = h.permute(0, 2, 3, 1)
+            #     # x = x.view(B*H*W, C)  # flatten
+            #     h = torch.reshape(h, (B * H * W, C))
+            # import ipdb
+
+            # ipdb.set_trace()
+            outputs = self.decoder_blks[-1](h)
+            # if spatial:
+            #     outputs = outputs.reshape(B, self.output_ch, H, W)
         return outputs
 
     @classmethod
@@ -165,130 +195,6 @@ class ResnetFC(nn.Module):
             use_spade=conf.get_bool("use_spade", False),
             **kwargs
         )
-
-
-class ResnetCombineFC(nn.Module):
-    def __init__(
-        self,
-        D,
-        output_ch=4,
-        n_blocks=5,
-        d_latent=0,
-        W=128,
-        beta=0.0,
-        combine_layer=3,
-        combine_type="average",
-        use_spade=False,
-    ):
-        """
-        :param d_in input size
-        :param d_out output size
-        :param n_blocks number of Resnet blocks
-        :param d_latent latent size, added in each resnet block (0 = disable)
-        :param d_hidden hiddent dimension throughout network
-        :param beta softplus beta, 100 is reasonable; if <=0 uses ReLU activations instead
-        """
-        super().__init__()
-        if D > 0:
-            self.lin_in = nn.Linear(D, W)
-            # nn.init.constant_(self.lin_in.bias, 0.0)
-            # nn.init.kaiming_normal_(self.lin_in.weight, a=0, mode="fan_in")
-
-        self.lin_out = nn.Linear(W, output_ch)
-        # nn.init.constant_(self.lin_out.bias, 0.0)
-        # nn.init.kaiming_normal_(self.lin_out.weight, a=0, mode="fan_in")
-
-        self.n_blocks = n_blocks
-        self.d_latent = d_latent
-        self.d_in = D
-        self.d_out = output_ch
-        self.d_hidden = W
-
-        self.combine_layer = combine_layer
-        self.combine_type = combine_type
-        self.use_spade = use_spade
-
-        self.blocks = nn.ModuleList(
-            [ResnetBlockFC(W, beta=beta) for i in range(n_blocks)]
-        )
-
-        if d_latent != 0:
-            n_lin_z = min(combine_layer, n_blocks)
-            self.lin_z = nn.ModuleList([nn.Linear(d_latent, W) for i in range(n_lin_z)])
-            # for i in range(n_lin_z):
-            # nn.init.constant_(self.lin_z[i].bias, 0.0)
-            # nn.init.kaiming_normal_(self.lin_z[i].weight, a=0, mode="fan_in")
-
-            if self.use_spade:
-                self.scale_z = nn.ModuleList(
-                    [nn.Linear(d_latent, W) for _ in range(n_lin_z)]
-                )
-                # for i in range(n_lin_z):
-                #     nn.init.constant_(self.scale_z[i].bias, 0.0)
-                #     nn.init.kaiming_normal_(self.scale_z[i].weight, a=0, mode="fan_in")
-
-        if beta > 0:
-            self.activation = nn.Softplus(beta=beta)
-        else:
-            self.activation = nn.ReLU()
-
-        # init_model(self)
-
-    def forward(
-        self,
-        zx,
-        combine_inner_dims=(1,),
-    ):
-        """
-        :param zx (..., d_latent + d_in)
-        :param combine_inner_dims Combining dimensions for use with multiview inputs.
-        Tensor will be reshaped to (-1, combine_inner_dims, ...) and reduced using combine_type
-        on dim 1, at combine_layer
-        """
-        # with profiler.record_function("resnetfc_infer"):
-        assert zx.size(-1) == self.d_latent + self.d_in
-        if self.d_latent > 0:
-            z = zx[..., : self.d_latent]
-            x = zx[..., self.d_latent :]
-        else:
-            x = zx
-        if self.d_in > 0:
-            x = self.lin_in(x)
-        else:
-            x = torch.zeros(self.d_hidden, device=zx.device)
-
-        for blkid in range(self.n_blocks):
-            if blkid == self.combine_layer:
-                # The following implements camera frustum culling, requires torch_scatter
-                #  if combine_index is not None:
-                #      combine_type = (
-                #          "mean"
-                #          if self.combine_type == "average"
-                #          else self.combine_type
-                #      )
-                #      if dim_size is not None:
-                #          assert isinstance(dim_size, int)
-                #      x = torch_scatter.scatter(
-                #          x,
-                #          combine_index,
-                #          dim=0,
-                #          dim_size=dim_size,
-                #          reduce=combine_type,
-                #      )
-                #  else:
-                x = util.combine_interleaved(x, combine_inner_dims, self.combine_type)
-
-            if self.d_latent > 0 and blkid < self.combine_layer:
-                tz = self.lin_z[blkid](z)
-                if self.use_spade:
-                    sz = self.scale_z[blkid](z)
-                    x = sz * x + tz
-                else:
-                    x = x + tz
-
-            x = self.blocks[blkid](x)
-        out = self.lin_out(self.activation(x))
-        return out
 
     @classmethod
     def from_conf(cls, conf, d_in, **kwargs):
@@ -315,9 +221,12 @@ class ResnetBlockFC(nn.Module):
     :param size_h (int): hidden dimension
     """
 
-    def __init__(self, size_in, size_out=None, size_h=None, beta=0.0):
+    def __init__(
+        self, size_in, size_out=None, size_h=None, beta=0.0, spatial_output=False
+    ):
         super().__init__()
         # Attributes
+        self.spatial_output = spatial_output  # transform output 2D
         if size_out is None:
             size_out = size_in
 
@@ -346,11 +255,16 @@ class ResnetBlockFC(nn.Module):
             self.shortcut = None
         else:
             self.shortcut = nn.Linear(size_in, size_out, bias=False)
-            # nn.init.constant_(self.shortcut.bias, 0.0)
             nn.init.kaiming_normal_(self.shortcut.weight, a=0, mode="fan_in")
 
     def forward(self, x):
-        # with profiler.record_function("resblock"):
+        spatial_output = x.dim() == 4
+        if spatial_output:
+            B, C, H, W = x.shape[:]
+            x = x.permute(0, 2, 3, 1)
+            # x = x.view(B*H*W, C)  # flatten
+            x = torch.reshape(x, (B * H * W, C))
+
         net = self.fc_0(self.activation(x))
         dx = self.fc_1(self.activation(net))
 
@@ -358,6 +272,10 @@ class ResnetBlockFC(nn.Module):
             x_s = self.shortcut(x)
         else:
             x_s = x
+        if spatial_output:
+            return (
+                (x_s + dx).reshape(B, H, W, self.size_out).permute(0, 3, 1, 2)
+            )  # TODO
         return x_s + dx
 
 

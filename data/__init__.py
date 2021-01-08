@@ -9,7 +9,8 @@ from util import image_to_normalized_tensor
 
 
 def create_dataset(args):
-    c, data, normalized_img_tensor, i_fixed = None, None, None, None
+    c, data, normalized_img_tensor, i_fixed, i_fixed_test = None, None, None, None, None
+    decoder_images, decoder_images_normalized = None, None
     if args.dataset_type not in ("llff", "blender", "deepvoxels"):
         dataset = get_split_dataset(
             args.dataset_type, args.datadir, split=["train", "train_test"]
@@ -22,6 +23,16 @@ def create_dataset(args):
         instance = [s[args.srn_object_id] for s in dataset]
         views_avai = instance[0]["images"].shape[0]
         test_views_avai = instance[-1]["images"].shape[0]
+
+        if args.add_decoder:
+            decoder_instances = [dataset[0][i] for i in range(args.decoder_train_objs)]
+            decoder_images = torch.cat(
+                [i["images"][:] for i in decoder_instances], 0
+            ).float()
+
+            decoder_images_normalized = image_to_normalized_tensor(  # TODO
+                decoder_images.permute(0, 3, 1, 2)
+            ).float()  # 250 * 3 * 128 * 128
 
         if len(args.srn_input_views_id.split()) > 1:
             # if len(list(map(int, args.srn_input_views_id.split())))
@@ -47,7 +58,7 @@ def create_dataset(args):
 
         input_imgs = instance[0]["images"][input_views_ids, ...]
         test_imgs = instance[-1]["images"][test_views, ...]
-        images = torch.cat([input_imgs, test_imgs], dim=0)
+        images = torch.cat([input_imgs, test_imgs], dim=0).float()
 
         normalized_img_tensor = image_to_normalized_tensor(  # TODO
             images.permute(0, 3, 1, 2)
@@ -75,6 +86,14 @@ def create_dataset(args):
             list(map(int, args.srn_encode_views_id.split()))
         ]  # TODO
         print("i_fixed: {}".format(i_fixed))
+
+        # encode test views if set
+        if args.encode_test_views:
+            i_fixed_test = list(map(int, args.srn_encode_test_views_id.split()))
+            if i_fixed_test[0] == -1:
+                i_fixed_test = (
+                    i_train  # same idx of train split to test views for encoding
+                )
 
         render_poses = instance[-1]["poses"][test_views, ...]
         # instance[1]["poses"][::test_idx_interv]
@@ -168,4 +187,7 @@ def create_dataset(args):
         data,
         normalized_img_tensor,
         i_fixed,
+        i_fixed_test,
+        decoder_images,
+        decoder_images_normalized,
     )

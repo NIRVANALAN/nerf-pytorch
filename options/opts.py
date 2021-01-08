@@ -273,7 +273,7 @@ def config_parser():
     # srn dataset
     parser.add_argument("--srn_object_id", type=int, default=0, help="srn object id")
     parser.add_argument(
-        "--srn_input_views", type=int, default=2, help="srn input view number"
+        "--srn_input_views", type=int, default=3, help="srn input view number"
     )
     parser.add_argument(
         "--srn_input_views_id", type=str, default="0", help="srn input views id"
@@ -310,5 +310,38 @@ def config_parser():
     parser.add_argument(
         "--encode_test", action="store_true", help="Whether to condition on test views"
     )
+    parser.add_argument("--add_decoder", action="store_true", help="append decoder")
 
+    parser.add_argument(
+        "--decoder_train_objs",
+        type=int,
+        default=1,
+        help="how many objs to train the AE separately",
+    )
+
+    parser.add_argument("--ae_batch", type=int, default=32, help="BS of AE")
+    parser.add_argument("--ae_lambda", type=int, default=0.5, help="weight for ae loss")
+    parser.add_argument(
+        "--encoder_interv",
+        type=int,
+        default=-1,
+        help="how many objs to train the AE separately",
+    )
+
+    parser.add_argument(
+        "--mlp_render", action="store_true", help="nerf mlp module as AE decoder"
+    )
+
+    parser.add_argument(
+        "--encode_test_views",
+        action="store_true",
+        help="whether to encode test views during test",
+    )
+
+    parser.add_argument(
+        "--srn_encode_test_views_id",
+        type=str,
+        default="-1",
+        help="fixed training views for encoding view spaces",
+    )
     return parser

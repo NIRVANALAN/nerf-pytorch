@@ -1,11 +1,15 @@
 """
 Implements image encoders
 """
+from models.networks import ResnetBlock
 import torch
 from torch import nn
+from torch._C import import_ir_module_from_buffer
 import torch.nn.functional as F
 import torchvision
 import torch.autograd.profiler as profiler
+
+from models import resnetfc
 
 
 class SpatialEncoder(nn.Module):
@@ -24,6 +28,9 @@ class SpatialEncoder(nn.Module):
         feature_scale=1.0,
         use_first_pool=True,
         norm_type="batch",
+        add_decoder=False,
+        mlp_render_net=None,
+        decoder_activation_layer=nn.Sigmoid(),
     ):
         """
         :param backbone Backbone network. Either custom, in which case
@@ -63,7 +70,16 @@ class SpatialEncoder(nn.Module):
         # Following 2 lines need to be uncommented for older configs
         self.model.fc = nn.Sequential()
         self.model.avgpool = nn.Sequential()
-        self.latent_size = [0, 64, 128, 256, 512, 1024][num_layers]
+        self.mlp_render = mlp_render_net is not None
+
+        # remove unused layers #TODO
+        # self.model.layer
+
+        # layer1-4
+
+        self.latent_size = [0, 64, 128, 256, 512, 1024][
+            num_layers
+        ]  #! 64 + 64 + 128 + 256
 
         self.num_layers = num_layers
         self.index_interp = index_interp
@@ -75,46 +91,60 @@ class SpatialEncoder(nn.Module):
         )
         # self.latent (B, L, H, W)
 
-    def index(self, uv, image_size=(), z_bounds=None):
-        """
-        Get pixel-aligned image features at 2D image coordinates
-        :param uv (B, N, 2) image points (x,y)
-        :param cam_z ignored (for compatibility)
-        :param image_size image size, either (width, height) or single int.
-        if not specified, assumes coords are in [-1, 1]
-        :param z_bounds ignored (for compatibility)
-        :return (B, L, N) L is latent size
-        """
-        with profiler.record_function("encoder_index"):
-            if uv.shape[0] == 1 and self.latent.shape[0] > 1:
-                import ipdb
+        if add_decoder:
+            decoder_model = []
+            ngf = 64
 
-                ipdb.set_trace()
-                uv = uv.expand(self.latent.shape[0], -1, -1)
+            if self.mlp_render:
+                filters = [256, 256, 256, 256, 256]
+            else:
+                filters = [256, 128, 64, 64, 64]
+            use_bias = norm_type == "instance"
+            n_downsampling = 4
 
-            with profiler.record_function("encoder_index_pre"):
-                if len(image_size) > 0:
-                    if len(image_size) == 1:
-                        image_size = (image_size, image_size)
+            for i in range(n_downsampling):  # add upsampling layers
+                # mult = 2 ** (n_downsampling - i)
+                decoder_model += [
+                    nn.ConvTranspose2d(
+                        filters[i],
+                        # ngf * mult,
+                        # int(ngf * mult / 2),
+                        filters[i + 1],
+                        kernel_size=3,
+                        stride=2,
+                        padding=1,
+                        output_padding=1,
+                        bias=use_bias,
+                    ),
+                    nn.BatchNorm2d(
+                        filters[i + 1], affine=True, track_running_stats=True
+                    ),
+                    # norm_layer(int(ngf * mult / 2)),
+                    nn.ReLU(True),
+                ]
+            decoder_model = [nn.Sequential(*decoder_model)]  # conv decoder
 
-                    scale = self.latent_scaling / image_size
-                    uv = uv * scale - 1.0  # (uv/image_size-0.5)*2
+            if mlp_render_net is not None:
+                if mlp_render_net == "new_blk":
+                    decoder_model += [  # DEBUG
+                        resnetfc.ResnetBlockFC(ngf, 3, spatial_output=True)
+                    ]
+                else:
+                    decoder_model += mlp_render_net
+            else:  # default output net
+                decoder_model += [
+                    nn.Sequential(
+                        nn.ReflectionPad2d(3),
+                        nn.Conv2d(ngf, 3, kernel_size=7, padding=0),
+                    )
+                ]
 
-            uv = uv.unsqueeze(2)  # (B, N, 1, 2)
-            samples = F.grid_sample(
-                self.latent,
-                uv,
-                align_corners=True,
-                mode=self.index_interp,
-                padding_mode=self.index_padding,
-            )
+            decoder_model += [decoder_activation_layer]  # TODO
+            self.decoder = nn.ModuleList(decoder_model)
+        else:
+            self.decoder = None
 
-            return samples[:, :, :, 0]  # (B, C, N)
-
-    def forward(
-        self,
-        x,
-    ):
+    def forward(self, x, encode=True):
         """
         For extracting ResNet's features.
         :param x image (B, C, H, W)
@@ -136,39 +166,99 @@ class SpatialEncoder(nn.Module):
             x = self.model.conv1(x)
             x = self.model.bn1(x)
             x = self.model.relu(x)
+            if encode:
+                latents = [x]
+                if self.num_layers > 1:
+                    if self.use_first_pool:
+                        x = self.model.maxpool(x)
+                    x = self.model.layer1(x)
+                    latents.append(x)
+                if self.num_layers > 2:
+                    x = self.model.layer2(x)
+                    latents.append(x)
+                if self.num_layers > 3:
+                    x = self.model.layer3(x)
+                    latents.append(x)
+                if self.num_layers > 4:  # layer 5
+                    x = self.model.layer4(x)
+                    latents.append(x)
 
-            latents = [x]
-            if self.num_layers > 1:
+                self.latents = latents
+                align_corners = None if self.index_interp == "nearest " else True
+                latent_sz = latents[0].shape[-2:]
+                for i in range(len(latents)):
+                    latents[i] = F.interpolate(
+                        latents[i],
+                        latent_sz,
+                        mode=self.upsample_interp,
+                        align_corners=align_corners,
+                    )
+                self.latent = torch.cat(latents, dim=1)
+                self.latent_scaling[0] = self.latent.shape[-1]
+                self.latent_scaling[1] = self.latent.shape[-2]
+                self.latent_scaling = (
+                    self.latent_scaling / (self.latent_scaling - 1) * 2.0
+                )
+                # return self.latent  # 512 * w/2 * w/2
+            else:
                 if self.use_first_pool:
                     x = self.model.maxpool(x)
                 x = self.model.layer1(x)
-                latents.append(x)
-            if self.num_layers > 2:
                 x = self.model.layer2(x)
-                latents.append(x)
-            if self.num_layers > 3:
                 x = self.model.layer3(x)
-                latents.append(x)
-            if self.num_layers > 4:
-                x = self.model.layer4(x)
-                latents.append(x)
+                # x = self.model.layer4(x)
 
-            self.latents = latents
-            align_corners = None if self.index_interp == "nearest " else True
-            latent_sz = latents[0].shape[-2:]
-            for i in range(len(latents)):
-                latents[i] = F.interpolate(
-                    latents[i],
-                    latent_sz,
-                    mode=self.upsample_interp,
-                    align_corners=align_corners,
-                )
-            self.latent = torch.cat(latents, dim=1)
-        self.latent_scaling[0] = self.latent.shape[-1]
-        self.latent_scaling[1] = self.latent.shape[-2]
-        self.latent_scaling = self.latent_scaling / (self.latent_scaling - 1) * 2.0
-        # self.bank[img_i] = self.latent
-        return self.latent  # 512 * w/2 * w/2
+        if self.decoder != None and not encode:
+            x = self.decoder[0](x)  # deconv
+            if self.mlp_render:  # Y
+                x = self.decoder[1](x)  # mlp renderer RESBLKS
+                B, C, H, W = x.shape[:]
+                x = x.permute(0, 2, 3, 1)
+                # x = x.view(B*H*W, C)  # flatten
+                x = torch.reshape(x, (B * H * W, C))
+                x = self.decoder[2](x)  # lin_out mlp render
+                x = x.reshape(B, H, W, 5)  # TODO
+
+            else:  # X
+                x = self.decoder[1](x)  # 2D conv render
+                x = x.permute(0, 2, 3, 1)
+
+            outputs = self.decoder[-1](x)  # sigmoid activation
+
+            return outputs
+
+    def index(self, uv, image_size=(), z_bounds=None):
+        """
+        Get pixel-aligned image features at 2D image coordinates
+        :param uv (B, N, 2) image points (x,y)
+        :param cam_z ignored (for compatibility)
+        :param image_size image size, either (width, height) or single int.
+        if not specified, assumes coords are in [-1, 1]
+        :param z_bounds ignored (for compatibility)
+        :return (B, L, N) L is latent size
+        """
+        with profiler.record_function("encoder_index"):
+            if uv.shape[0] == 1 and self.latent.shape[0] > 1:
+                uv = uv.expand(self.latent.shape[0], -1, -1)
+
+            with profiler.record_function("encoder_index_pre"):
+                if len(image_size) > 0:
+                    if len(image_size) == 1:
+                        image_size = (image_size, image_size)
+
+                    scale = self.latent_scaling / image_size
+                    uv = uv * scale - 1.0  # (uv/image_size-0.5)*2
+
+            uv = uv.unsqueeze(2)  # (B, N, 1, 2)
+            samples = F.grid_sample(
+                self.latent,
+                uv,
+                align_corners=True,
+                mode=self.index_interp,
+                padding_mode=self.index_padding,
+            )
+
+            return samples[:, :, :, 0]  # (B, C, N)
 
     @classmethod
     def from_conf(cls, conf):

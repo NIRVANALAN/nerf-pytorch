@@ -8,3 +8,7 @@
 logs/*
 configs
 srn_dataset
+debug
+configs
+mnist_train
+events*

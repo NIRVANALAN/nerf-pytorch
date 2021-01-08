@@ -170,3 +170,111 @@ class SRNDataset(torch.utils.data.Dataset):
         # }
 
         return result
+
+
+class SceneInstanceDataset:
+    """This creates a dataset class for a single object instance (such as a single car)."""
+
+    def __init__(
+        self,
+        instance_idx,
+        instance_dir,
+        specific_observation_idcs=None,  # For few-shot case: Can pick specific observations only
+        img_sidelength=None,
+        num_images=-1,
+    ):
+        self.instance_idx = instance_idx
+        self.img_sidelength = img_sidelength
+        self.instance_dir = instance_dir
+        self._coord_trans = torch.diag(
+            torch.tensor([1, -1, -1, 1], dtype=torch.float32)
+        )
+
+        color_dir = os.path.join(instance_dir, "rgb")
+        pose_dir = os.path.join(instance_dir, "pose")
+        param_dir = os.path.join(instance_dir, "params")
+
+        if not os.path.isdir(color_dir):
+            print("Error! root dir %s is wrong" % instance_dir)
+            return
+
+        self.has_params = os.path.isdir(param_dir)
+
+        self.color_paths = sorted(glob.glob(os.path.join(color_dir, "rgb", "*.png")))
+        self.pose_paths = sorted(glob.glob(os.path.join(pose_dir, "pose", "*.txt")))
+        # self.color_paths = sorted(data_util.glob_imgs(color_dir))
+        # self.pose_paths = sorted(glob(os.path.join(pose_dir, "*.txt")))
+
+        # if self.has_params:
+        #     self.param_paths = sorted(glob(os.path.join(param_dir, "*.txt")))
+        # else:
+        #     self.param_paths = []
+
+        if specific_observation_idcs is not None:
+            self.color_paths = pick(self.color_paths, specific_observation_idcs)
+            self.pose_paths = pick(self.pose_paths, specific_observation_idcs)
+            self.param_paths = pick(self.param_paths, specific_observation_idcs)
+        elif num_images != -1:
+            idcs = np.linspace(
+                0, stop=len(self.color_paths), num=num_images, endpoint=False, dtype=int
+            )
+            self.color_paths = pick(self.color_paths, idcs)
+            self.pose_paths = pick(self.pose_paths, idcs)
+            self.param_paths = pick(self.param_paths, idcs)
+
+    def set_img_sidelength(self, new_img_sidelength):
+        """For multi-resolution training: Updates the image sidelength with whichimages are loaded."""
+        self.img_sidelength = new_img_sidelength
+
+    def __len__(self):
+        return len(self.pose_paths)
+
+    def __getitem__(self, idx):
+
+        intrinsics, _, _, _ = util.parse_intrinsics(
+            os.path.join(self.instance_dir, "intrinsics.txt"),
+            trgt_sidelength=self.img_sidelength,
+        )
+        intrinsics = torch.Tensor(intrinsics).float()
+
+        rgb = data_util.load_rgb(self.color_paths[idx], sidelength=self.img_sidelength)
+        rgb = rgb.reshape(3, -1).transpose(1, 0)
+
+        pose = torch.from_numpy(
+            np.loadtxt(self.pose_paths[idx], dtype=np.float32).reshape(4, 4)
+        ).to(self._coord_trans.device)
+        pose = pose @ self._coord_trans
+
+        data_util.load_pose(self.pose_paths[idx])
+
+        if self.has_params:
+            params = load_params(self.param_paths[idx])
+        else:
+            params = np.array([0])
+
+        uv = np.mgrid[0 : self.img_sidelength, 0 : self.img_sidelength].astype(np.int32)
+        uv = torch.from_numpy(np.flip(uv, axis=0).copy()).long()  # UV
+        uv = uv.reshape(2, -1).transpose(1, 0)
+
+        sample = {
+            "instance_idx": torch.Tensor([self.instance_idx]).squeeze(),
+            "rgb": torch.from_numpy(rgb).float(),
+            "pose": torch.from_numpy(pose).float(),
+            "uv": uv,
+            "param": torch.from_numpy(params).float(),
+            "intrinsics": intrinsics,
+        }
+        return sample
+
+
+def pick(list, item_idcs):
+    if not list:
+        return list
+    return [list[i] for i in item_idcs]
+
+
+def load_params(filename):
+    lines = open(filename).read().splitlines()
+
+    params = np.array([float(x) for x in lines[0].split()]).astype(np.float32).squeeze()
+    return params

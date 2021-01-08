@@ -91,6 +91,29 @@ def get_embedder(multires, i=0):
     return embed, embedder_obj.out_dim
 
 
+def cartesian_coord(H, W, precrop_frac=None, reshape=False):
+    if precrop_frac != None:  # 500
+        dH = int(H // 2 * precrop_frac)
+        dW = int(W // 2 * precrop_frac)
+        coords_ij = torch.stack(
+            torch.meshgrid(
+                torch.linspace(H // 2 - dH, H // 2 + dH - 1, 2 * dH),
+                torch.linspace(W // 2 - dW, W // 2 + dW - 1, 2 * dW),
+            ),
+            -1,
+        )
+    else:
+        coords_ij = torch.stack(
+            torch.meshgrid(torch.linspace(0, H - 1, H), torch.linspace(0, W - 1, W)),
+            -1,
+        )  # stack in 'ij' indexing order. -> (H, W, 2)
+
+    # coords_ij[i,j] = [i,j]
+    if reshape:
+        coords_ij = torch.reshape(coords_ij, [-1, 2])  # (H * W, 2)
+    return coords_ij
+
+
 # Ray helpers
 def unproj_map(width, height, f, c=None):
     """

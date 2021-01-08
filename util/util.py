@@ -551,3 +551,12 @@ def get_module(net):
         return net.module
     else:
         return net
+
+
+def to_img(x, channel=1, img_size=28):
+    if x.min() < 0:
+        x = 0.5 * (x + 1)  # -1~1
+    x = x.clamp(0, 1)
+    x = x.permute(0, 3, 1, 2)
+    # x = x.reshape(x.size(0), channel, img_size, img_size)
+    return x

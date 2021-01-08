@@ -327,7 +327,7 @@ def render(
 def batchify_rays(rays_flat, chunk=1024 * 32, **kwargs):
     """Render rays in smaller minibatches to avoid OOM."""
     all_ret = {}
-    for i in range(0, rays_flat.shape[0], chunk):
+    for i in range(0, rays_flat.shape[0], chunk):  # 128*11
         ret = render_rays(rays_flat[i : i + chunk], **kwargs)
         for k in ret:
             if k not in all_ret:
