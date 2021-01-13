@@ -31,38 +31,6 @@ todevice = (
 )  # for compatibility. torch.Tensor(tensor) will fail if tensor already on cuda
 
 
-def extract_mesh(render_kwargs, mesh_grid_size=80, threshold=50):
-    network_query_fn, network = (
-        render_kwargs["network_query_fn"],
-        render_kwargs["network_fine"],
-    )
-    device = next(network.parameters()).device
-
-    with torch.no_grad():
-        points = np.linspace(-1, 1, mesh_grid_size)
-        query_pts = (
-            torch.tensor(
-                np.stack(np.meshgrid(points, points, points), -1).astype(np.float32)
-            )
-            .reshape(-1, 1, 3)
-            .to(device)
-        )
-        viewdirs = torch.zeros(query_pts.shape[0], 3).to(device)
-
-        output = network_query_fn(query_pts, viewdirs, network)  # TODO
-
-        grid = output[..., -1].reshape(mesh_grid_size, mesh_grid_size, mesh_grid_size)
-
-        print("fraction occupied:", (grid > threshold).float().mean())
-
-        vertices, triangles = mcubes.marching_cubes(
-            grid.detach().cpu().numpy(), threshold
-        )
-        mesh = trimesh.Trimesh(vertices, triangles)
-
-    return mesh
-
-
 def main():
     parser = config_parser()
     args = parser.parse_args()
@@ -214,27 +182,11 @@ def main():
 
     if use_batching:
         # For random ray batching
-
-        print("get rays")
-        # rays = np.stack(
-        #     [get_rays_np(H, W, focal, p) for p in poses[:, :3, :4]], 0
-        # )  # [N, ro+rd, H, W, 3] #?
-        # print("done, concats")
-        # rays_rgb = np.concatenate([rays, images[:, None]], 1)  # [N, ro+rd+rgb, H, W, 3]
-        # rays_rgb = np.transpose(rays_rgb, [0, 2, 3, 1, 4])  # [N, H, W, ro+rd+rgb, 3]
-        # rays_rgb = np.stack([rays_rgb[i] for i in i_train], 0)  # train images only
-        # rays_rgb = np.reshape(rays_rgb, [-1, 3, 3])  # [(N-1)*H*W, ro+rd+rgb, 3]
-        # rays_rgb = rays_rgb.astype(np.float32)
-        # print("shuffle rays")
-        # np.random.shuffle(rays_rgb)
-
-        # torch version
-
+        # print("get rays")
         rays = torch.stack(  # TODO
             [get_rays(H, W, focal, p, c) for p in poses[:, :3, :4]], 0
         )  # [N, ro+rd, H, W, 3] #?
 
-        print("done, concats")
         rays_rgb = torch.cat([rays, images[:, None]], 1)  # [N, ro+rd+rgb, H, W, 3]
         rays_rgb = rays_rgb.permute(0, 2, 3, 1, 4)  # [N, H, W, ro+rd+rgb, 3]
         rays_rgb = torch.stack([rays_rgb[i] for i in i_train], 0)  # train images only
@@ -242,18 +194,14 @@ def main():
         rays_rgb = rays_rgb.view(-1, 3, 3)
         # rays_rgb = torch.reshape(rays_rgb, [-1, 3, 3])  # [(N-1)*H*W, ro+rd+rgb, 3]
 
-        # print("shuffle rays")
-        # rays_rgb = rays_rgb.astype(np.float32)
-        # np.random.shuffle(rays_rgb) # * shuffle along the first axis
-        rays_rgb = rays_rgb[torch.randperm(rays_rgb.size(0))]
-        # # to cuda
-
+        rays_rgb = rays_rgb[
+            torch.randperm(rays_rgb.size(0))
+        ]  # * shuffle along the first axis
         rays_rgb = todevice(rays_rgb)
-
-        print("done")
+        # print("done")
         i_batch = 0
 
-    print("Begin")
+    # print("Begin")
     print("TRAIN views are {}".format(i_train))
     print("TEST views number: {}".format(len(i_test)))
     # print("VAL views are", i_val)  # TODO
@@ -278,7 +226,7 @@ def main():
             network.encode(img_Tensor[i_fixed], poses[i_fixed], focal)  # TODO
 
         #! AE
-        if args.add_decoder:
+        if args.enc_type != "none" and args.add_decoder:
 
             img_i_ae = np.random.choice(
                 decoder_imgs_normalized.shape[0], size=args.ae_batch

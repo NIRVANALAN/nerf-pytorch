@@ -272,8 +272,9 @@ def config_parser():
     )
     # srn dataset
     parser.add_argument("--srn_object_id", type=int, default=0, help="srn object id")
+
     parser.add_argument(
-        "--srn_input_views", type=int, default=3, help="srn input view number"
+        "--srn_input_views", type=int, default=9, help="srn input view number"
     )
     parser.add_argument(
         "--srn_input_views_id", type=str, default="0", help="srn input views id"
@@ -344,4 +345,19 @@ def config_parser():
         default="-1",
         help="fixed training views for encoding view spaces",
     )
+
+    parser.add_argument(
+        "--decoder_dataset",
+        type=str,
+        default="car",
+        help="instances for decoder to train",
+    )
+
+    parser.add_argument(
+        "--nerf_train_dataset",
+        type=str,
+        default="car",
+        help="instances for decoder to train",
+    )
+
     return parser

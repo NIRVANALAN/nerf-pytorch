@@ -560,3 +560,16 @@ def to_img(x, channel=1, img_size=28):
     x = x.permute(0, 3, 1, 2)
     # x = x.reshape(x.size(0), channel, img_size, img_size)
     return x
+
+
+def batchify(fn, chunk):
+    """Constructs a version of 'fn' that applies to smaller batches."""
+    if chunk is None:
+        return fn
+
+    def ret(inputs):
+        return torch.cat(
+            [fn(inputs[i : i + chunk]) for i in range(0, inputs.shape[0], chunk)], 0
+        )
+
+    return ret

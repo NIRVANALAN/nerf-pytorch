@@ -4,9 +4,10 @@ from .load_deepvoxels import *
 from .load_llff import *
 import os
 
-from .data_util import get_split_dataset, ColorJitterDataset
+from .data_util import get_split_dataset, # ColorJitterDataset
 from util import image_to_normalized_tensor
 
+# __all__=[*]
 
 def create_dataset(args):
     c, data, normalized_img_tensor, i_fixed, i_fixed_test = None, None, None, None, None
@@ -16,16 +17,19 @@ def create_dataset(args):
             args.dataset_type, args.datadir, split=["train", "train_test"]
         )
 
-        # dataset = get_split_dataset(
-        #     args.dataset_type, args.datadir, split=["train_test"]
-        # )
-
-        instance = [s[args.srn_object_id] for s in dataset]
-        views_avai = instance[0]["images"].shape[0]
-        test_views_avai = instance[-1]["images"].shape[0]
-
         if args.add_decoder:
-            decoder_instances = [dataset[0][i] for i in range(args.decoder_train_objs)]
+            if args.decoder_dataset not in args.datadir:
+                decoder_dir = args.datadir.replace(
+                    args.datadir.split("/")[-1], args.decoder_dataset
+                )
+                dataset_decoder = get_split_dataset(
+                    args.dataset_type, decoder_dir, split=["train"]
+                )
+            else:
+                dataset_decoder = dataset
+            decoder_instances = [
+                dataset_decoder[0][i] for i in range(args.decoder_train_objs)
+            ]  # TODO
             decoder_images = torch.cat(
                 [i["images"][:] for i in decoder_instances], 0
             ).float()
@@ -33,6 +37,15 @@ def create_dataset(args):
             decoder_images_normalized = image_to_normalized_tensor(  # TODO
                 decoder_images.permute(0, 3, 1, 2)
             ).float()  # 250 * 3 * 128 * 128
+            pass
+
+        # dataset = get_split_dataset(
+        #     args.dataset_type, args.datadir, split=["train_test"]
+        # )
+
+        instance = [s[args.srn_object_id] for s in dataset]
+        views_avai = instance[0]["images"].shape[0]
+        test_views_avai = instance[-1]["images"].shape[0]
 
         if len(args.srn_input_views_id.split()) > 1:
             # if len(list(map(int, args.srn_input_views_id.split())))
@@ -84,7 +97,7 @@ def create_dataset(args):
 
         i_fixed = input_views_ids[
             list(map(int, args.srn_encode_views_id.split()))
-        ]  # TODO
+        ]  # todo
         print("i_fixed: {}".format(i_fixed))
 
         # encode test views if set

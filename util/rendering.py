@@ -336,3 +336,35 @@ def batchify_rays(rays_flat, chunk=1024 * 32, **kwargs):
 
     all_ret = {k: torch.cat(all_ret[k], 0) for k in all_ret}
     return all_ret
+
+
+def extract_mesh(render_kwargs, mesh_grid_size=80, threshold=50):
+    network_query_fn, network = (
+        render_kwargs["network_query_fn"],
+        render_kwargs["network_fine"],
+    )
+    device = next(network.parameters()).device
+
+    with torch.no_grad():
+        points = np.linspace(-1, 1, mesh_grid_size)
+        query_pts = (
+            torch.tensor(
+                np.stack(np.meshgrid(points, points, points), -1).astype(np.float32)
+            )
+            .reshape(-1, 1, 3)
+            .to(device)
+        )
+        viewdirs = torch.zeros(query_pts.shape[0], 3).to(device)
+
+        output = network_query_fn(query_pts, viewdirs, network)  # TODO
+
+        grid = output[..., -1].reshape(mesh_grid_size, mesh_grid_size, mesh_grid_size)
+
+        print("fraction occupied:", (grid > threshold).float().mean())
+
+        vertices, triangles = mcubes.marching_cubes(
+            grid.detach().cpu().numpy(), threshold
+        )
+        mesh = trimesh.Trimesh(vertices, triangles)
+
+    return mesh
