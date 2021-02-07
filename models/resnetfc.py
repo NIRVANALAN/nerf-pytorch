@@ -1,8 +1,9 @@
-from socket import IP_DROP_MEMBERSHIP
 import torch
 from torch import nn
 from torch._C import import_ir_module_from_buffer
 import torch.nn.functional as F
+
+import ipdb
 
 #  import torch_scatter
 import torch.autograd.profiler as profiler
@@ -19,24 +20,22 @@ def init_model(module: torch.nn.Module):
 
 
 class ResnetFC(nn.Module):
-    def __init__(
-        self,
-        D=5,
-        W=128,
-        input_ch=3,
-        input_ch_views=3,
-        output_ch=4,
-        d_latent=0,
-        beta=0.0,
-        combine_layer=3,
-        use_spade=False,
-        use_viewdirs=True,
-        viewdirs_res=False,
-        input_views=1,
-        agg_type="cat",
-        *args,
-        **kwargs
-    ):
+    def __init__(self,
+                 D=5,
+                 W=128,
+                 input_ch=3,
+                 input_ch_views=3,
+                 output_ch=4,
+                 d_latent=0,
+                 beta=0.0,
+                 combine_layer=3,
+                 use_spade=False,
+                 use_viewdirs=True,
+                 viewdirs_res=False,
+                 input_views=1,
+                 agg_type="cat",
+                 *args,
+                 **kwargs):
         """
         Resnet FC  backbone without multi-view input.
         Improved version of original nerf net
@@ -70,7 +69,8 @@ class ResnetFC(nn.Module):
             self.alpha_linear = nn.Linear(W, 1)
             self.rgb_linear = nn.Linear(W // 2, 3)
             ### Implementation according to the official code release (https://github.com/bmild/nerf/blob/master/run_nerf_helpers.py#L104-L105)
-            self.views_linears = nn.ModuleList([nn.Linear(input_ch_views + W, W // 2)])
+            self.views_linears = nn.ModuleList(
+                [nn.Linear(input_ch_views + W, W // 2)])
         else:
             self.lin_in = nn.Linear(input_ch + input_ch_views, W)
             self.lin_out = nn.Linear(W, output_ch)
@@ -81,33 +81,38 @@ class ResnetFC(nn.Module):
         # self.use_spade = use_spade
 
         self.encoder_blks = nn.ModuleList(
-            [ResnetBlockFC(W, beta=beta) for _ in range(combine_layer)]
-        )
-        self.decoder_blks = nn.ModuleList(
-            [
-                nn.Sequential(
-                    *[ResnetBlockFC(W, beta=beta) for _ in range(D - combine_layer)]
-                )
-            ]
-            + [self.lin_out]
-        )
+            [ResnetBlockFC(W, beta=beta) for _ in range(combine_layer)])
+        self.decoder_blks = nn.ModuleList([
+            nn.Sequential(*[
+                ResnetBlockFC(W, beta=beta) for _ in range(D - combine_layer)
+            ])
+        ])
+        if not viewdirs_res:
+            self.decoder_blks.append(self.lin_out)
+        else:
+            self.decoder_blks.append(
+                nn.ModuleList(
+                    [self.feature_linear, self.views_linears,
+                     self.rgb_linear]))
 
         if self.d_latent != 0:
             n_lin_z = min(combine_layer, D)
             self.lin_z = nn.ModuleList(
-                [nn.Linear(self.d_latent, W) for i in range(n_lin_z)]
-            )
+                [nn.Linear(self.d_latent, W) for i in range(n_lin_z)])
             for i in range(n_lin_z):
                 nn.init.constant_(self.lin_z[i].bias, 0.0)
-                nn.init.kaiming_normal_(self.lin_z[i].weight, a=0, mode="fan_in")
+                nn.init.kaiming_normal_(self.lin_z[i].weight,
+                                        a=0,
+                                        mode="fan_in")
 
             if self.use_spade:
                 self.scale_z = nn.ModuleList(
-                    [nn.Linear(d_latent, W) for _ in range(n_lin_z)]
-                )
+                    [nn.Linear(d_latent, W) for _ in range(n_lin_z)])
                 for i in range(n_lin_z):
                     nn.init.constant_(self.scale_z[i].bias, 0.0)
-                    nn.init.kaiming_normal_(self.scale_z[i].weight, a=0, mode="fan_in")
+                    nn.init.kaiming_normal_(self.scale_z[i].weight,
+                                            a=0,
+                                            mode="fan_in")
 
         # if beta > 0:
         #     self.activation = nn.Softplus(beta=beta)
@@ -123,15 +128,16 @@ class ResnetFC(nn.Module):
         """
         # with profiler.record_function("resnetfc_infer"):
         if self.d_latent > 0:
-            z = xz[..., : self.d_latent]
-            h = xz[..., self.d_latent :]
+            z = xz[..., :self.d_latent]
+            h = xz[..., self.d_latent:]
         else:
             h = xz
 
         if self.viewdirs_res:
-            h, input_views = torch.split(
-                h, [self.input_ch, self.input_ch_views], dim=-1
-            )
+            h, input_views = torch.split(h,
+                                         [self.input_ch, self.input_ch_views],
+                                         dim=-1)
+            # ipdb.set_trace()
 
         # if self.input_ch > 0:
         h = self.lin_in(h)  #  -> 512
@@ -168,16 +174,7 @@ class ResnetFC(nn.Module):
             rgb = self.rgb_linear(h)
             outputs = torch.cat([rgb, alpha], -1)
         else:
-            # if h.dim() == 4:
-            #     spatial = True
-            #     B, C, H, W = h.shape[:]
-            #     x = h.permute(0, 2, 3, 1)
-            #     # x = x.view(B*H*W, C)  # flatten
-            #     h = torch.reshape(h, (B * H * W, C))
-            # import ipdb
-
-            # ipdb.set_trace()
-            outputs = self.decoder_blks[-1](h)
+            outputs = self.decoder_blks[-1](h)  # self.lin_out
             # if spatial:
             #     outputs = outputs.reshape(B, self.output_ch, H, W)
         return outputs
@@ -191,10 +188,10 @@ class ResnetFC(nn.Module):
             d_hidden=conf.get_int("d_hidden", 128),
             beta=conf.get_float("beta", 0.0),
             combine_layer=conf.get_int("combine_layer", 3),
-            combine_type=conf.get_string("combine_type", "average"),  # average | max
+            combine_type=conf.get_string("combine_type",
+                                         "average"),  # average | max
             use_spade=conf.get_bool("use_spade", False),
-            **kwargs
-        )
+            **kwargs)
 
     @classmethod
     def from_conf(cls, conf, d_in, **kwargs):
@@ -205,10 +202,10 @@ class ResnetFC(nn.Module):
             d_hidden=conf.get_int("d_hidden", 128),
             beta=conf.get_float("beta", 0.0),
             combine_layer=conf.get_int("combine_layer", 3),
-            combine_type=conf.get_string("combine_type", "average"),  # average | max
+            combine_type=conf.get_string("combine_type",
+                                         "average"),  # average | max
             use_spade=conf.get_bool("use_spade", False),
-            **kwargs
-        )
+            **kwargs)
 
 
 # Resnet Blocks
@@ -220,10 +217,12 @@ class ResnetBlockFC(nn.Module):
     :param size_out (int): output dimension
     :param size_h (int): hidden dimension
     """
-
-    def __init__(
-        self, size_in, size_out=None, size_h=None, beta=0.0, spatial_output=False
-    ):
+    def __init__(self,
+                 size_in,
+                 size_out=None,
+                 size_h=None,
+                 beta=0.0,
+                 spatial_output=False):
         super().__init__()
         # Attributes
         self.spatial_output = spatial_output  # transform output 2D
@@ -273,9 +272,9 @@ class ResnetBlockFC(nn.Module):
         else:
             x_s = x
         if spatial_output:
-            return (
-                (x_s + dx).reshape(B, H, W, self.size_out).permute(0, 3, 1, 2)
-            )  # TODO
+            return ((x_s + dx).reshape(B, H, W,
+                                       self.size_out).permute(0, 3, 1,
+                                                              2))  # TODO
         return x_s + dx
 
 
@@ -307,22 +306,20 @@ def combine_interleaved(t, agg_type="average"):
 
 
 class ResnetFC_GRL(nn.Module):
-    def __init__(
-        self,
-        D=5,
-        W=512,
-        input_ch=3,
-        input_ch_views=3,
-        output_ch=4,
-        d_latent=0,
-        beta=0.0,
-        agg_layer=4,
-        use_viewdirs=True,
-        viewdirs_res=False,
-        agg_type="att",
-        input_views=1,
-        **kwargs
-    ):
+    def __init__(self,
+                 D=5,
+                 W=512,
+                 input_ch=3,
+                 input_ch_views=3,
+                 output_ch=4,
+                 d_latent=0,
+                 beta=0.0,
+                 agg_layer=4,
+                 use_viewdirs=True,
+                 viewdirs_res=False,
+                 agg_type="att",
+                 input_views=1,
+                 **kwargs):
         """
         Resnet FC  backbone without multi-view input.
         Improved version of original nerf net
@@ -356,7 +353,8 @@ class ResnetFC_GRL(nn.Module):
             self.alpha_linear = nn.Linear(W, 1)
             self.rgb_linear = nn.Linear(W // 2, 3)
             ### Implementation according to the official code release (https://github.com/bmild/nerf/blob/master/run_nerf_helpers.py#L104-L105)
-            self.views_linears = nn.ModuleList([nn.Linear(input_ch_views + W, W // 2)])
+            self.views_linears = nn.ModuleList(
+                [nn.Linear(input_ch_views + W, W // 2)])
         else:
             self.lin_in = nn.Linear(input_ch + input_ch_views, W)
             self.lin_out = nn.Linear(dim_out, output_ch)
@@ -369,14 +367,18 @@ class ResnetFC_GRL(nn.Module):
         # TODO self-att module
         self.agg_module = None
 
-        self.blocks = [ResnetBlockFC(W, beta=beta) for _ in range(agg_layer - 1)]
+        self.blocks = [
+            ResnetBlockFC(W, beta=beta) for _ in range(agg_layer - 1)
+        ]
         if self.agg_layer < D:
             self.blocks.insert(
                 self.agg_layer,
-                ResnetBlockFC(size_in=W + self.d_latent, size_out=W, beta=beta),
+                ResnetBlockFC(size_in=W + self.d_latent, size_out=W,
+                              beta=beta),
             )
         else:
-            self.blocks.insert(-1, ResnetBlockFC(size_in=W, size_out=W, beta=beta))
+            self.blocks.insert(-1,
+                               ResnetBlockFC(size_in=W, size_out=W, beta=beta))
 
         self.blocks = nn.ModuleList(self.blocks)
 
@@ -391,15 +393,15 @@ class ResnetFC_GRL(nn.Module):
         """
         # with profiler.record_function("resnetfc_infer"):
         if self.d_latent > 0:
-            z = xz[..., : self.d_latent]
-            h = xz[..., self.d_latent :]
+            z = xz[..., :self.d_latent]
+            h = xz[..., self.d_latent:]
         else:
             h = xz
 
         if self.viewdirs_res:
-            h, input_views = torch.split(
-                h, [self.input_ch, self.input_ch_views], dim=-1
-            )
+            h, input_views = torch.split(h,
+                                         [self.input_ch, self.input_ch_views],
+                                         dim=-1)
 
         # if self.input_ch > 0:
         h = self.lin_in(h)  #  -> 512
@@ -440,7 +442,7 @@ class ResnetFC_GRL(nn.Module):
             d_hidden=conf.get_int("d_hidden", 128),
             beta=conf.get_float("beta", 0.0),
             combine_layer=conf.get_int("combine_layer", 3),
-            combine_type=conf.get_string("combine_type", "average"),  # average | max
+            combine_type=conf.get_string("combine_type",
+                                         "average"),  # average | max
             use_spade=conf.get_bool("use_spade", False),
-            **kwargs
-        )
+            **kwargs)

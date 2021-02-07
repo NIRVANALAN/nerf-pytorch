@@ -1,6 +1,7 @@
 """
 Implements image encoders
 """
+import ipdb
 from models.networks import ResnetBlock
 import torch
 from torch import nn
@@ -16,7 +17,6 @@ class SpatialEncoder(nn.Module):
     """
     2D (Spatial/Pixel-aligned/local) image encoder
     """
-
     def __init__(
         self,
         backbone="resnet34",
@@ -29,8 +29,12 @@ class SpatialEncoder(nn.Module):
         use_first_pool=True,
         norm_type="batch",
         add_decoder=False,
-        mlp_render_net=None,
-        decoder_activation_layer=nn.Sigmoid(),
+        mlp_decoder=None,
+        decoder_activation_layer=nn.Tanh(),
+        output_dim=5,
+        viewdirs_res=False,
+        input_ch_views=3,
+        fix_decoder_params=False,
     ):
         """
         :param backbone Backbone network. Either custom, in which case
@@ -52,43 +56,48 @@ class SpatialEncoder(nn.Module):
         if norm_type != "batch":
             assert not pretrained
 
+        self.fix_decoder_params = fix_decoder_params
         self.use_custom_resnet = backbone == "custom"
         self.feature_scale = feature_scale
         self.use_first_pool = use_first_pool
+        self.viewdirs_res = viewdirs_res
+        self.input_ch_views = input_ch_views
         # norm_layer = util.get_norm_layer(norm_type)
 
-        print(
-            "Using torchvision",
-            backbone,
-            "encoder",
-            "Pretrained: {}".format(pretrained),
-        )
-        self.model = getattr(torchvision.models, backbone)(
-            pretrained=pretrained,
-            # norm_layer=norm_layer
-        )
+        # output_dim
+        self.output_dim = output_dim
+
+        print("Using torchvision", backbone, "encoder",
+              "Pretrained: {}".format(pretrained),
+              "fix_grad: {}".format(self.fix_decoder_params))
+
+        self.model = getattr(torchvision.models,
+                             backbone)(pretrained=pretrained,
+                                       # norm_layer=norm_layer
+                                       )
         # Following 2 lines need to be uncommented for older configs
         self.model.fc = nn.Sequential()
         self.model.avgpool = nn.Sequential()
-        self.mlp_render = mlp_render_net is not None
+        self.mlp_render = mlp_decoder is not None
 
         # remove unused layers #TODO
         # self.model.layer
 
         # layer1-4
 
-        self.latent_size = [0, 64, 128, 256, 512, 1024][
-            num_layers
-        ]  #! 64 + 64 + 128 + 256
+        self.latent_size = [0, 64, 128, 256, 512,
+                            1024][num_layers]  #! 64 + 64 + 128 + 256
 
         self.num_layers = num_layers
         self.index_interp = index_interp
         self.index_padding = index_padding
         self.upsample_interp = upsample_interp
-        self.register_buffer("latent", torch.empty(1, 1, 1, 1), persistent=False)
-        self.register_buffer(
-            "latent_scaling", torch.empty(2, dtype=torch.float32), persistent=False
-        )
+        self.register_buffer("latent",
+                             torch.empty(1, 1, 1, 1),
+                             persistent=False)
+        self.register_buffer("latent_scaling",
+                             torch.empty(2, dtype=torch.float32),
+                             persistent=False)
         # self.latent (B, L, H, W)
 
         if add_decoder:
@@ -116,21 +125,21 @@ class SpatialEncoder(nn.Module):
                         output_padding=1,
                         bias=use_bias,
                     ),
-                    nn.BatchNorm2d(
-                        filters[i + 1], affine=True, track_running_stats=True
-                    ),
+                    nn.BatchNorm2d(filters[i + 1],
+                                   affine=True,
+                                   track_running_stats=True),
                     # norm_layer(int(ngf * mult / 2)),
                     nn.ReLU(True),
                 ]
             decoder_model = [nn.Sequential(*decoder_model)]  # conv decoder
 
-            if mlp_render_net is not None:
-                if mlp_render_net == "new_blk":
+            if mlp_decoder is not None:
+                if mlp_decoder == "new_blk":
                     decoder_model += [  # DEBUG
                         resnetfc.ResnetBlockFC(ngf, 3, spatial_output=True)
                     ]
                 else:
-                    decoder_model += mlp_render_net
+                    decoder_model += mlp_decoder
             else:  # default output net
                 decoder_model += [
                     nn.Sequential(
@@ -143,6 +152,10 @@ class SpatialEncoder(nn.Module):
             self.decoder = nn.ModuleList(decoder_model)
         else:
             self.decoder = None
+
+        if self.fix_decoder_params:
+            for param in self.decoder.parameters():
+                param.requires_grad = False
 
     def forward(self, x, encode=True):
         """
@@ -196,9 +209,8 @@ class SpatialEncoder(nn.Module):
                 self.latent = torch.cat(latents, dim=1)
                 self.latent_scaling[0] = self.latent.shape[-1]
                 self.latent_scaling[1] = self.latent.shape[-2]
-                self.latent_scaling = (
-                    self.latent_scaling / (self.latent_scaling - 1) * 2.0
-                )
+                self.latent_scaling = (self.latent_scaling /
+                                       (self.latent_scaling - 1) * 2.0)
                 # return self.latent  # 512 * w/2 * w/2
             else:
                 if self.use_first_pool:
@@ -209,21 +221,39 @@ class SpatialEncoder(nn.Module):
                 # x = self.model.layer4(x)
 
         if self.decoder != None and not encode:
-            x = self.decoder[0](x)  # deconv
+            x = self.decoder[0](x)  # deconv to restore the original size
             if self.mlp_render:  # Y
-                x = self.decoder[1](x)  # mlp renderer RESBLKS
+                x = self.decoder[1](x)  # mlp renderer RESBLKS(2)
                 B, C, H, W = x.shape[:]
                 x = x.permute(0, 2, 3, 1)
                 # x = x.view(B*H*W, C)  # flatten
                 x = torch.reshape(x, (B * H * W, C))
-                x = self.decoder[2](x)  # lin_out mlp render
-                x = x.reshape(B, H, W, 5)  # TODO
 
-            else:  # X
+                if not self.viewdirs_res:
+                    x = self.decoder[2](x)  # lin_out mlp render
+                    x = x.reshape(B, H, W,
+                                  self.output_dim)  # .permute(0, 3, 1, 2)
+                else:
+
+                    # cat zeros viewdirs to match nerf network design
+                    # nn.ModuleList([self.feature_linear, self.viewdirs_res, self.rgb_linear])
+
+                    feature = self.decoder[2][0](x)  # feature_linear(x)
+                    input_views = torch.zeros((x.size(0), self.input_ch_views))
+                    x = torch.cat([feature, input_views], -1)
+
+                    for _, l in enumerate(self.decoder[2][1]):
+                        x = l(x)
+                        x = F.relu(x)
+
+                    x = self.decoder[2][2](x)
+                    x = x.reshape(B, H, W, 3)
+
+            else:  # X arch
                 x = self.decoder[1](x)  # 2D conv render
-                x = x.permute(0, 2, 3, 1)
+                # x = x.permute(0, 2, 3, 1)
 
-            outputs = self.decoder[-1](x)  # sigmoid activation
+            outputs = self.decoder[-1](x)  # activation
 
             return outputs
 
@@ -278,7 +308,6 @@ class ImageEncoder(nn.Module):
     """
     Global image encoder
     """
-
     def __init__(self, backbone="resnet34", pretrained=True, latent_size=128):
         """
         :param backbone Backbone network. Assumes it is resnet*
@@ -287,7 +316,8 @@ class ImageEncoder(nn.Module):
         :param pretrained Whether to use model pretrained on ImageNet
         """
         super().__init__()
-        self.model = getattr(torchvision.models, backbone)(pretrained=pretrained)
+        self.model = getattr(torchvision.models,
+                             backbone)(pretrained=pretrained)
         self.model.fc = nn.Sequential()
         self.register_buffer("latent", torch.empty(1, 1), persistent=False)
         # self.latent (B, L)

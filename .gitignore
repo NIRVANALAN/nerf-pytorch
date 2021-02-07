@@ -5,10 +5,11 @@
 *.npy
 *.npz
 *.dae
-logs/*
+logs
 configs
 srn_dataset
 debug
 configs
 mnist_train
 events*
+data/imagenet

@@ -8,6 +8,8 @@ from .resnetfc import ResnetFC, ResnetFC_GRL
 from .encoder import SpatialEncoder, ImageEncoder
 from util import get_embedder, batchify
 
+import ipdb
+
 model_dict = {"nerf": NeRF, "resnetFC": ResnetFC, "resnetGRL": ResnetFC_GRL}
 encoder_dict = {
     "spatial": SpatialEncoder,
@@ -22,9 +24,7 @@ class NetworkSystem:
         if args.arch not in model_dict:
             raise NotImplementedError(
                 "no {} architecture found. Please select in {}".format(
-                    args.arch, model_dict.keys()
-                )
-            )
+                    args.arch, model_dict.keys()))
 
         self.start = 0
         # Note: this is world -> camera, and bottom row is omitted
@@ -36,16 +36,19 @@ class NetworkSystem:
         nerf_net = model_dict[args.arch]
         embed_fn, input_ch = get_embedder(args.multires, args.i_embed)
 
+        self.random_encode = args.random_ord_encode
+        self.number_encode_view = args.number_encode_view
+
         input_ch_views = 0
         embeddirs_fn = None
         if args.use_viewdirs:
             embeddirs_fn, input_ch_views = get_embedder(
-                args.multires_views, args.i_embed
-            )
+                args.multires_views, args.i_embed)
         output_ch = 5 if args.N_importance > 0 else 4
         # * create encoder
 
-        self.d_latent = 512 if args.enc_type != "none" else 0
+        self.d_latent = (512 if (args.enc_type != "none"
+                                 and not args.decoder_only) else 0)
 
         # self.encoder = make_encoder(conf["encoder"])
         skips = [4]
@@ -88,44 +91,50 @@ class NetworkSystem:
             ).to(device)
             grad_vars += list(self.model_fine.parameters())
 
-            print(self.model_fine)
+            # print(self.model_fine)
 
         # define encoder
         if args.enc_type != "none":
             assert args.enc_type in encoder_dict.keys()
+            self.stop_encoder_grad = args.stop_encoder_grad
             self.encoder = encoder_dict[args.enc_type](
                 index_padding=args.index_padding,
                 pretrained=not args.encoder_no_pretrain,
                 add_decoder=args.add_decoder,
-                mlp_render_net=self.model_fine.decoder_blks
-                if args.mlp_render
-                else None,  # TODO
+                mlp_decoder=self.model_fine.decoder_blks
+                if args.mlp_render else None,  # TODO
+                output_dim=output_ch,
+                viewdirs_res=args.viewdirs_res,
+                input_ch_views=input_ch_views,
+                fix_decoder_params=args.fix_decoder_params,
             )  # default params
             print("encoder index padding mode: {}".format(args.index_padding))
-            self.enable_encoder_grad = (
-                args.enable_encoder_grad
-            )  # update ConvNet gradient (not freeze weights)
             # self.d_latent = self.encoder.latent_size
 
             # add parameters of Encoder if needed
             if args.add_decoder:  # TODO
-                grad_vars += list(self.encoder.parameters())
+                if args.encoder_only:
+                    grad_vars = list(self.encoder.parameters())
+                    print("only encoder params")
+                else:
+                    grad_vars += list(self.encoder.parameters())
 
         else:
             self.encoder = None
 
         # Create optimizer, load model
-        self.optimizer = torch.optim.Adam(
-            params=grad_vars, lr=args.lrate, betas=(0.9, 0.999)
-        )
+        self.optimizer = torch.optim.Adam(params=grad_vars,
+                                          lr=args.lrate,
+                                          betas=(0.9, 0.999),
+                                          weight_decay=1e-5)
 
         # load ckpt
         if args.ft_path is not None and args.ft_path != "None":
             ckpts = [args.ft_path]
         else:
             ckpts = [
-                os.path.join(args.basedir, args.expname, f)
-                for f in sorted(os.listdir(os.path.join(args.basedir, args.expname)))
+                os.path.join(args.basedir, args.expname, f) for f in sorted(
+                    os.listdir(os.path.join(args.basedir, args.expname)))
                 if "tar" in f
             ]
 
@@ -141,7 +150,17 @@ class NetworkSystem:
             # Load model
             self.model.load_state_dict(ckpt["network_fn_state_dict"])
             if self.model_fine is not None:
-                self.model_fine.load_state_dict(ckpt["network_fine_state_dict"])
+                self.model_fine.load_state_dict(
+                    ckpt["network_fine_state_dict"])
+            # Load encoder
+            if self.encoder is not None:
+                self.encoder.load_state_dict(ckpt["encoder"])
+        if args.encoder_ft_path:
+            encoder_ckpt = torch.load(args.encoder_ft_path)
+            if self.encoder is not None:
+                self.encoder.load_state_dict(encoder_ckpt["encoder"])
+            else:
+                self.model_fine.decoder_blks.load_state_dict(encoder_ckpt[""])
 
         self.grad_vars = grad_vars
 
@@ -174,7 +193,10 @@ class NetworkSystem:
             render_kwargs_train["ndc"] = False
             render_kwargs_train["lindisp"] = args.lindisp
 
-        render_kwargs_test = {k: render_kwargs_train[k] for k in render_kwargs_train}
+        render_kwargs_test = {
+            k: render_kwargs_train[k]
+            for k in render_kwargs_train
+        }
         render_kwargs_test["perturb"] = False
         render_kwargs_test["raw_noise_std"] = 0.0
 
@@ -182,6 +204,7 @@ class NetworkSystem:
         self.render_kwargs_test = render_kwargs_test
         self.normalize_z = args.normalize_z
         self.agg_type = args.agg_type
+        self.condition_feat = not args.decoder_only
 
         # return render_kwargs_train, render_kwargs_test, # start, optimizer
 
@@ -196,11 +219,9 @@ class NetworkSystem:
         """
         if poses == None:
             poses = self.poses
-        xyz_rot = torch.matmul(
-            poses[:, None, :3, :3], xyz.reshape(-1, xyz.shape[0], 3, 1)
-        )[
-            ..., 0
-        ]  # N * BS * 3
+        xyz_rot = torch.matmul(poses[:, None, :3, :3],
+                               xyz.reshape(-1, xyz.shape[0], 3,
+                                           1))[..., 0]  # N * BS * 3
         if return_rot:
             return xyz_rot
         return xyz_rot + poses[:, None, :3, 3]
@@ -229,26 +250,28 @@ class NetworkSystem:
         if self.transform_into_viewspace:
             # Transform query points into the camera spaces of the input views
             if self.normalize_z:
-                inputs_flat = self.transform_view_space(inputs_flat, return_rot=True)
+                inputs_flat = self.transform_view_space(inputs_flat,
+                                                        return_rot=True)
             else:
-                inputs_flat = self.transform_view_space(inputs_flat, return_rot=False)
+                inputs_flat = self.transform_view_space(inputs_flat,
+                                                        return_rot=False)
             # inputs_flat = inputs_flat.unsqueeze(0)  # align with pix-nerf
         embedded = embed_fn(inputs_flat)
 
         if viewdirs is not None:
             input_dirs = viewdirs[:, None].expand(inputs.shape)
             input_dirs_flat = torch.reshape(
-                input_dirs, [-1, input_dirs.shape[-1]]
-            )  # 4096, 3
+                input_dirs, [-1, input_dirs.shape[-1]])  # 4096, 3
 
             if self.transform_into_viewspace:
                 # transform viewdirs into view space
-                input_dirs_flat = self.transform_view_space(input_dirs_flat)  # N*BS*3
+                input_dirs_flat = self.transform_view_space(
+                    input_dirs_flat)  # N*BS*3
 
             embedded_dirs = embeddirs_fn(input_dirs_flat)
             embedded = torch.cat([embedded, embedded_dirs], -1)
 
-        if self.encoder is not None:  # encode latent code
+        if self.condition_feat and self.encoder is not None:  # encode latent code
             # embedded = torch.repeat_interleave(embedded.unsqueeze(0), self.num_objs, 0)
 
             if not self.transform_into_viewspace:
@@ -262,12 +285,14 @@ class NetworkSystem:
             uv += self.c
 
             ### IMPORTANT: transform uv from Cartisian indexing into 'ij' indexing ###
-            uv = torch.flip(uv, [-1])
+            uv = torch.flip(uv, [-1])  # TODO
             ### IMPORTANT ###
 
-            latent = self.encoder.index(
-                uv, self.image_shape
-            ).detach()  # ([1, 512, 4096])
+            latent = self.encoder.index(uv,
+                                        self.image_shape)  # ([1, 512, 4096])
+
+            if self.stop_encoder_grad:
+                latent.detach()
 
             latent = latent.permute(0, 2, 1)  # 2 4096 512
 
@@ -281,8 +306,8 @@ class NetworkSystem:
             if latent.size(0) != 1:
                 if self.agg_type == "cat":
                     latent = latent.permute(1, 2, 0).reshape(
-                        (1, latent.shape[1], -1)
-                    )  # merge the two feature dimension
+                        (1, latent.shape[1],
+                         -1))  # merge the two feature dimension
                 elif self.agg_type == "avg":
                     latent = latent.mean(dim=0, keepdim=True)
                 else:  # default
@@ -293,8 +318,8 @@ class NetworkSystem:
         outputs_flat = batchify(fn, netchunk)(embedded)
         # outputs_flat = fn(embedded)  # TODO, memory peak
         outputs = torch.reshape(
-            outputs_flat, list(inputs.shape[:-1]) + [outputs_flat.shape[-1]]
-        )
+            outputs_flat,
+            list(inputs.shape[:-1]) + [outputs_flat.shape[-1]])
         return outputs
 
     #
@@ -313,19 +338,18 @@ class NetworkSystem:
         if len(images.shape) == 5:  # multi object input
             assert len(poses.shape) == 4
             assert poses.size(1) == images.size(
-                1
-            )  # Be consistent with NS = num input views
+                1)  # Be consistent with NS = num input views
             self.num_views_per_obj = images.size(1)
             images = images.reshape(-1, *images.shape[2:])
             poses = poses.reshape(-1, 4, 4)
         else:
             self.num_views_per_obj = 1
 
-        if self.enable_encoder_grad:
-            self.encoder(images)  # memery bank
-        else:
-            with torch.no_grad():  # todo
-                self.encoder(images)  # memery bank
+        # if self.enable_encoder_grad:
+        #     self.encoder(images)  # memery bank
+        # else:
+        #     with torch.no_grad():  # todo
+        self.encoder(images)  # memery bank
 
         # * TEST TIME MULTIVIEW INPUT
         # if not self.model.training:

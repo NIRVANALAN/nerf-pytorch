@@ -3,23 +3,34 @@ import configargparse
 
 def config_parser():
     parser = configargparse.ArgumentParser()
-    parser.add_argument("--config", is_config_file=True, help="config file path")
+    parser.add_argument("--config",
+                        is_config_file=True,
+                        help="config file path")
     parser.add_argument("--expname", type=str, help="experiment name")
 
-    parser.add_argument(
-        "--basedir", type=str, default="./logs/", help="where to store ckpts and logs"
-    )
+    parser.add_argument("--basedir",
+                        type=str,
+                        default="./logs/",
+                        help="where to store ckpts and logs")
 
-    parser.add_argument(
-        "--datadir", type=str, default="./data/llff/fern", help="input data directory"
-    )
+    parser.add_argument("--datadir",
+                        type=str,
+                        default="./data/llff/fern",
+                        help="input data directory")
 
     # training options
-    parser.add_argument("--netdepth", type=int, default=8, help="layers in network")
-    parser.add_argument("--netwidth", type=int, default=256, help="channels per layer")
-    parser.add_argument(
-        "--netdepth_fine", type=int, default=8, help="layers in fine network"
-    )
+    parser.add_argument("--netdepth",
+                        type=int,
+                        default=8,
+                        help="layers in network")
+    parser.add_argument("--netwidth",
+                        type=int,
+                        default=256,
+                        help="channels per layer")
+    parser.add_argument("--netdepth_fine",
+                        type=int,
+                        default=8,
+                        help="layers in fine network")
     parser.add_argument(
         "--netwidth_fine",
         type=int,
@@ -32,7 +43,10 @@ def config_parser():
         default=32 * 32 * 4,
         help="batch size (number of random rays per gradient step)",
     )
-    parser.add_argument("--lrate", type=float, default=5e-4, help="learning rate")
+    parser.add_argument("--lrate",
+                        type=float,
+                        default=5e-4,
+                        help="learning rate")
     parser.add_argument(
         "--lrate_decay",
         type=int,
@@ -43,22 +57,24 @@ def config_parser():
         "--chunk",
         type=int,
         default=1024 * 16,
-        help="number of rays processed in parallel, decrease if running out of memory",
+        help=
+        "number of rays processed in parallel, decrease if running out of memory",
     )
     parser.add_argument(
         "--netchunk",
         type=int,
         default=1024 * 64,
-        help="number of pts sent through network in parallel, decrease if running out of memory",
+        help=
+        "number of pts sent through network in parallel, decrease if running out of memory",
     )
     parser.add_argument(
         "--no_batching",
         action="store_true",
         help="only take random rays from 1 image at a time",
     )
-    parser.add_argument(
-        "--no_reload", action="store_true", help="do not reload weights from saved ckpt"
-    )
+    parser.add_argument("--no_reload",
+                        action="store_true",
+                        help="do not reload weights from saved ckpt")
     parser.add_argument(
         "--ft_path",
         type=str,
@@ -67,9 +83,10 @@ def config_parser():
     )
 
     # rendering options
-    parser.add_argument(
-        "--N_samples", type=int, default=64, help="number of coarse samples per ray"
-    )
+    parser.add_argument("--N_samples",
+                        type=int,
+                        default=64,
+                        help="number of coarse samples per ray")
     parser.add_argument(
         "--N_importance",
         type=int,
@@ -82,9 +99,9 @@ def config_parser():
         default=1.0,
         help="set to 0. for no jitter, 1. for jitter",
     )
-    parser.add_argument(
-        "--use_viewdirs", action="store_true", help="use full 5D input instead of 3D"
-    )
+    parser.add_argument("--use_viewdirs",
+                        action="store_true",
+                        help="use full 5D input instead of 3D")
     parser.add_argument(
         "--i_embed",
         type=int,
@@ -107,7 +124,8 @@ def config_parser():
         "--raw_noise_std",
         type=float,
         default=0.0,
-        help="std dev of noise added to regularize sigma_a output, 1e0 recommended",
+        help=
+        "std dev of noise added to regularize sigma_a output, 1e0 recommended",
     )
 
     parser.add_argument(
@@ -124,7 +142,8 @@ def config_parser():
         "--render_factor",
         type=int,
         default=0,
-        help="downsampling factor to speed up rendering, set 4 or 8 for fast preview",
+        help=
+        "downsampling factor to speed up rendering, set 4 or 8 for fast preview",
     )
 
     # mesh options
@@ -137,7 +156,8 @@ def config_parser():
         "--mesh_grid_size",
         type=int,
         default=80,
-        help="number of grid points to sample in each dimension for marching cubes",
+        help=
+        "number of grid points to sample in each dimension for marching cubes",
     )
 
     # training options
@@ -165,7 +185,8 @@ def config_parser():
         "--testskip",
         type=int,
         default=8,
-        help="will load 1/N images from test/val sets, useful for large datasets like deepvoxels",
+        help=
+        "will load 1/N images from test/val sets, useful for large datasets like deepvoxels",
     )
 
     ## deepvoxels flags
@@ -180,7 +201,8 @@ def config_parser():
     parser.add_argument(
         "--white_bkgd",
         action="store_true",
-        help="set to render synthetic data on a white bkgd (always use for dvoxels)",
+        help=
+        "set to render synthetic data on a white bkgd (always use for dvoxels)",
     )
     parser.add_argument(
         "--half_res",
@@ -189,22 +211,24 @@ def config_parser():
     )
 
     ## llff flags
-    parser.add_argument(
-        "--factor", type=int, default=8, help="downsample factor for LLFF images"
-    )
+    parser.add_argument("--factor",
+                        type=int,
+                        default=8,
+                        help="downsample factor for LLFF images")
     parser.add_argument(
         "--no_ndc",
         action="store_true",
-        help="do not use normalized device coordinates (set for non-forward facing scenes)",
+        help=
+        "do not use normalized device coordinates (set for non-forward facing scenes)",
     )
     parser.add_argument(
         "--lindisp",
         action="store_true",
         help="sampling linearly in disparity rather than depth",
     )
-    parser.add_argument(
-        "--spherify", action="store_true", help="set for spherical 360 scenes"
-    )
+    parser.add_argument("--spherify",
+                        action="store_true",
+                        help="set for spherical 360 scenes")
     parser.add_argument(
         "--llffhold",
         type=int,
@@ -225,15 +249,18 @@ def config_parser():
         default=100,
         help="frequency of console printout and metric loggin",
     )
-    parser.add_argument(
-        "--i_img", type=int, default=500, help="frequency of tensorboard image logging"
-    )
-    parser.add_argument(
-        "--i_weights", type=int, default=10000, help="frequency of weight ckpt saving"
-    )
-    parser.add_argument(
-        "--i_testset", type=int, default=5000, help="frequency of testset saving"
-    )
+    parser.add_argument("--i_img",
+                        type=int,
+                        default=500,
+                        help="frequency of tensorboard image logging")
+    parser.add_argument("--i_weights",
+                        type=int,
+                        default=10000,
+                        help="frequency of weight ckpt saving")
+    parser.add_argument("--i_testset",
+                        type=int,
+                        default=10000,
+                        help="frequency of testset saving")
     parser.add_argument(
         "--i_video",
         type=int,
@@ -261,57 +288,59 @@ def config_parser():
         help="Whether to use uncoder & the type of encoder",
     )
     parser.add_argument(
-        "--enable_encoder_grad",
-        action="store_true",
-        help="whether to update encooder gradient",
-    )
-    parser.add_argument(
         "--use_spade",
         action="store_true",
         help="Whether to use spade-like spatial feature transform",
     )
     # srn dataset
-    parser.add_argument("--srn_object_id", type=int, default=0, help="srn object id")
+    parser.add_argument("--srn_object_id",
+                        type=int,
+                        default=0,
+                        help="srn object id")
 
-    parser.add_argument(
-        "--srn_input_views", type=int, default=9, help="srn input view number"
-    )
-    parser.add_argument(
-        "--srn_input_views_id", type=str, default="0", help="srn input views id"
-    )
+    parser.add_argument("--srn_input_views",
+                        type=int,
+                        default=9,
+                        help="srn input view number")
+    parser.add_argument("--srn_input_views_id",
+                        type=str,
+                        default="0",
+                        help="srn input views id")
     parser.add_argument(
         "--srn_encode_views_id",
         type=str,
         default="-1",
         help="fixed training views for encoding view spaces",
     )
-    parser.add_argument(
-        "--srn_test_idx_interv", type=int, default=2, help="test some ids"
-    )
+    parser.add_argument("--srn_test_idx_interv",
+                        type=int,
+                        default=2,
+                        help="test some ids")
     parser.add_argument("--agg_layer", type=int, default=3, help="agg_layer")
-    parser.add_argument(
-        "--normalize_z", action="store_true", help="Whether to shift z into origin"
-    )
+    parser.add_argument("--normalize_z",
+                        action="store_true",
+                        help="Whether to shift z into origin")
     parser.add_argument(
         "--transform_view_spaces",
         action="store_true",
         help="Whether to transform coords into view space",
     )
 
-    parser.add_argument(
-        "--index_padding", type=str, default="border", help="grid_sample() padding mode"
-    )
-    parser.add_argument(
-        "--encoder_no_pretrain", action="store_true", help="random init encoder"
-    )
-    parser.add_argument(
-        "--agg_type", type=str, default="", help="how to agg the features"
-    )
+    parser.add_argument("--index_padding",
+                        type=str,
+                        default="border",
+                        help="grid_sample() padding mode")
+    parser.add_argument("--encoder_no_pretrain",
+                        action="store_true",
+                        help="random init encoder")
+    parser.add_argument("--agg_type",
+                        type=str,
+                        default="",
+                        help="how to agg the features")
 
-    parser.add_argument(
-        "--encode_test", action="store_true", help="Whether to condition on test views"
-    )
-    parser.add_argument("--add_decoder", action="store_true", help="append decoder")
+    parser.add_argument("--add_decoder",
+                        action="store_true",
+                        help="append decoder")
 
     parser.add_argument(
         "--decoder_train_objs",
@@ -321,17 +350,20 @@ def config_parser():
     )
 
     parser.add_argument("--ae_batch", type=int, default=32, help="BS of AE")
-    parser.add_argument("--ae_lambda", type=int, default=0.5, help="weight for ae loss")
+    parser.add_argument("--ae_lambda",
+                        type=float,
+                        default=0.5,
+                        help="weight for ae loss")
     parser.add_argument(
         "--encoder_interv",
         type=int,
-        default=-1,
+        default=1,
         help="how many objs to train the AE separately",
     )
 
-    parser.add_argument(
-        "--mlp_render", action="store_true", help="nerf mlp module as AE decoder"
-    )
+    parser.add_argument("--mlp_render",
+                        action="store_true",
+                        help="nerf mlp module as AE decoder")
 
     parser.add_argument(
         "--encode_test_views",
@@ -360,4 +392,84 @@ def config_parser():
         help="instances for decoder to train",
     )
 
+    parser.add_argument("--torch_seed",
+                        type=int,
+                        default=0,
+                        help="manual seed for torch")
+
+    parser.add_argument(
+        "--input_view_sampling",
+        type=str,
+        default="linspace",
+        help="linspace or arange to sample input views",
+    )
+
+    parser.add_argument(
+        "--external_sampling",
+        type=str,
+        default="instance",
+        help="importance / instance / uniform sampling",
+    )
+
+    parser.add_argument(
+        "--memory_bank",
+        action="store_true",
+        help="whether to load memory_bank",
+    )
+
+    parser.add_argument(
+        "--decoder_bs",
+        type=int,
+        default=32,
+        help="how many objs to train the AE separately",
+    )
+
+    parser.add_argument(
+        "--encoder_only",
+        action="store_true",
+        help="only encoder params will be trained",
+    )
+
+    parser.add_argument(
+        "--encoder_ft_path",
+        type=str,
+        default=None,
+        help="pretrained encoder ckpt",
+    )
+
+    parser.add_argument(
+        "--decoder_only",
+        action="store_true",
+        help="encoder only for decoder, don't condition on the features",
+    )
+
+    parser.add_argument(
+        "--fix_decoder_params",
+        action="store_true",
+        help="fix parmas of decoder",
+    )
+
+    parser.add_argument(
+        "--mmcv_config",
+        type=str,
+        default=None,
+        help="mmcv config file path",
+    )
+
+    parser.add_argument(
+        "--random_ord_encode",
+        action="store_true",
+        help="encode random images each batch",
+    )
+
+    parser.add_argument("--number_encode_view",
+                        type=int,
+                        default=1,
+                        help="number of images for encode each batch")
+
+    parser.add_argument(
+        "--stop_encoder_grad",
+        action="store_true",
+        help="freeze grad of encoder",
+    )
     return parser

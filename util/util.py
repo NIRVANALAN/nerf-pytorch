@@ -553,7 +553,7 @@ def get_module(net):
         return net
 
 
-def to_img(x, channel=1, img_size=28):
+def to_img(x, channel=1, img_size=28, mean=None, std=None):
     if x.min() < 0:
         x = 0.5 * (x + 1)  # -1~1
     x = x.clamp(0, 1)
@@ -573,3 +573,34 @@ def batchify(fn, chunk):
         )
 
     return ret
+
+
+def calculate_mean_std(dataset_loader):
+    mean = 0.0
+    std = 0.0
+    nb_samples = 0.0
+    for data in dataset_loader:
+        #     print(data)
+        data = data[0]
+        batch_samples = data.size(0)
+        data = data.view(batch_samples, data.size(1), -1)
+        mean += data.mean(2).sum(0)
+        std += data.std(2).sum(0)
+        nb_samples += batch_samples
+
+    mean /= nb_samples
+    std /= nb_samples
+    return mean, std
+
+
+class Normalize(nn.Module):
+    """normalization layer"""
+
+    def __init__(self, power=2):
+        super(Normalize, self).__init__()
+        self.power = power
+
+    def forward(self, x):
+        norm = x.pow(self.power).sum(1, keepdim=True).pow(1.0 / self.power)
+        out = x.div(norm)
+        return out
