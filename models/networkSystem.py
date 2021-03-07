@@ -311,8 +311,11 @@ class NetworkSystem:
                 elif self.agg_type == "avg":
                     latent = latent.mean(dim=0, keepdim=True)
                 else:  # default
+                    embedded
                     pass
 
+            if not self.transform_into_viewspace and self.num_objs > 0:
+                embedded = torch.repeat_interleave(embedded, self.num_objs, 0)
             embedded = torch.cat((latent, embedded), dim=-1)
 
         outputs_flat = batchify(fn, netchunk)(embedded)

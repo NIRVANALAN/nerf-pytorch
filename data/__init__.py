@@ -1,23 +1,21 @@
+import glob
 import os
 import warnings
+from pathlib import Path
 
+import ipdb
 import mmcv
 import numpy as np
 import torch
-from mmcv import DictAction
-
 from mmcls.datasets import build_dataloader, build_dataset
+from mmcv import DictAction
+from torch.utils.data import DataLoader, TensorDataset
+from util import image_to_normalized_tensor
 
-from torch.utils.data import TensorDataset, DataLoader
-import ipdb
+from .data_util import get_split_dataset  # ColorJitterDataset
 from .load_blender import *
 from .load_deepvoxels import *
 from .load_llff import *
-from pathlib import Path
-import os
-
-from .data_util import get_split_dataset  # ColorJitterDataset
-from util import image_to_normalized_tensor
 
 # from
 
@@ -39,8 +37,6 @@ def create_dataset(args):
         test_views_avai = instance[-1]["images"].shape[0]
 
         if len(args.srn_input_views_id.split()) > 1:
-            # if len(list(map(int, args.srn_input_views_id.split())))
-            # if args.srn_input_views <= 2:
             input_views_ids = np.array(
                 list(map(int, args.srn_input_views_id.split())))
         else:
@@ -169,36 +165,53 @@ def create_dataset(args):
         # np.random.choice(np.arange(views_avai), size=args.srn_input_views)
         # input_views_id = (0, 38)  # try input views id = [0, 38]
 
-        input_imgs = instance[0]["images"][input_views_ids, ...]
+        train_poses = instance[0]["poses"][input_views_ids, ...]
+        train_imgs = instance[0]["images"][input_views_ids, ...]
         test_imgs = instance[-1]["images"][test_views, ...]
-        images = torch.cat([input_imgs, test_imgs], dim=0).float()
+
+        # add incremental imgs
+
+        if args.incremental_path != None:
+            incremental_imgs_path = sorted(
+                glob.glob(args.incremental_path + '/*.png'))
+            incremental_ids = np.array([
+                int(rgb_path.split('/')[-1].split('_')[0])
+                for rgb_path in incremental_imgs_path
+            ])
+            print('add incremental imgs id: {}'.format(incremental_ids))
+            incremental_imgs = torch.stack([
+                torch.from_numpy(imageio.imread(rgb_path)[..., :3] / 255)
+                for rgb_path in incremental_imgs_path
+            ])
+            # add incremental imgs to train
+            train_imgs = torch.cat([train_imgs, incremental_imgs], 0)
+            train_poses = torch.cat([
+                train_poses,
+                instance[-1]["poses"][incremental_ids, ...],
+            ])
+
+        images = torch.cat([train_imgs, test_imgs], dim=0).float()
 
         normalized_img_tensor = image_to_normalized_tensor(  # TODO
             images.permute(0, 3, 1, 2)).float()  # 250 * 3 * 128 * 128
 
-        i_test = np.arange(len(input_views_ids), images.size(0)).tolist()
-        i_train = np.arange(0, len(input_views_ids)).tolist()
-        i_val = None
-
-        poses = torch.cat(
-            # poses = np.concatenate(  # TODO
-            [
-                instance[0]["poses"][input_views_ids, ...],
-                # instance[1]["poses"][::test_idx_interv],
-                instance[-1]["poses"][test_views, ...],
-            ],
-            # dim=0,
-        )
+        poses = torch.cat([
+            train_poses,
+            instance[-1]["poses"][test_views, ...],
+        ], )
 
         poses = poses[:, :3, :4]  #!
 
-        # create fixed poses
+        i_train = np.arange(0, train_imgs.shape[0]).tolist()
+        i_test = np.arange(train_imgs.shape[0], images.size(0)).tolist()
+        i_val = None
 
+        # create fixed poses
         i_fixed = input_views_ids[list(
             map(int, args.srn_encode_views_id.split()))]  # todo
 
         # encode test views if set
-        if args.encode_test_views:
+        if not args.not_encode_test_views:
             i_fixed_test = list(map(int,
                                     args.srn_encode_test_views_id.split()))
             if i_fixed_test[0] == -1:
@@ -213,7 +226,7 @@ def create_dataset(args):
         # render_poses = render_poses[:, :3, :4]  #!
 
         near, far = dataset[0].z_near, dataset[0].z_far
-        hwf = [*input_imgs.shape[1:3], instance[0]["focal"]]
+        hwf = [*train_imgs.shape[1:3], instance[0]["focal"]]
         c = instance[0]["c"]
         data = instance[0]
         print("object id: {} | input view id: {}".format(

@@ -259,7 +259,7 @@ def config_parser():
                         help="frequency of weight ckpt saving")
     parser.add_argument("--i_testset",
                         type=int,
-                        default=10000,
+                        default=5000,
                         help="frequency of testset saving")
     parser.add_argument(
         "--i_video",
@@ -300,7 +300,7 @@ def config_parser():
 
     parser.add_argument("--srn_input_views",
                         type=int,
-                        default=9,
+                        default=None,
                         help="srn input view number")
     parser.add_argument("--srn_input_views_id",
                         type=str,
@@ -366,7 +366,7 @@ def config_parser():
                         help="nerf mlp module as AE decoder")
 
     parser.add_argument(
-        "--encode_test_views",
+        "--not_encode_test_views",
         action="store_true",
         help="whether to encode test views during test",
     )
@@ -374,7 +374,7 @@ def config_parser():
     parser.add_argument(
         "--srn_encode_test_views_id",
         type=str,
-        default="-1",
+        default="0 40",
         help="fixed training views for encoding view spaces",
     )
 
@@ -472,4 +472,11 @@ def config_parser():
         action="store_true",
         help="freeze grad of encoder",
     )
+
+    # incremental training
+    parser.add_argument(
+        "--incremental_path",
+        type=str,
+        default=None,
+        help="where to inversion output, comes from train_test by default")
     return parser

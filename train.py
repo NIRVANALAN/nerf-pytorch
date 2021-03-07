@@ -1,4 +1,5 @@
 import os
+from datetime import datetime
 import ipdb
 from options.opts import config_parser
 import numpy as np
@@ -8,6 +9,7 @@ import torch
 from torchvision.utils import save_image
 from tqdm import tqdm, trange
 import trimesh
+from pathlib import Path
 import mcubes
 
 import matplotlib.pyplot as plt
@@ -21,6 +23,8 @@ from torch.utils.tensorboard import SummaryWriter
 
 torch.set_default_tensor_type("torch.cuda.FloatTensor")
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+now = datetime.now()
 # set seed
 
 # print = lambda x: print(*x, flush=True)
@@ -62,7 +66,7 @@ def main():
 
     # Create log dir and copy the config file
 
-    args.expname = f"{args.srn_input_views}views_{'viewdirs' if args.viewdirs_res else 'viewinput'}_{'raw' if not args.add_decoder else 'Y' if args.mlp_render else 'X'}_{args.basedir.split('/')[-1]}_id{args.srn_object_id}_{args.external_sampling}_{args.decoder_train_objs}_{args.expname}"
+    args.expname = f"{len(i_train)}_{'viewdirs' if args.viewdirs_res else 'viewinput'}_{args.basedir.split('/')[-1]}id{args.srn_object_id}_{args.external_sampling}_{args.decoder_train_objs}_{args.expname}_{now.strftime('%b_%d_%H_%M')}"
     print("expname: {}".format(args.expname))
 
     basedir = args.basedir
@@ -202,6 +206,9 @@ def main():
     # print("TRAIN views are {}".format(i_train))
     print("TEST views number: {}".format(len(i_test)))
     # print("VAL views are", i_val)  # TODO
+    psnr_savedir = os.path.join(basedir, expname, 'psnr')
+
+    os.makedirs(psnr_savedir, exist_ok=True)
 
     # coord_ij for later use
     coord_cartesian = {
@@ -320,7 +327,8 @@ def main():
                                   1]]  # (N_rand, 3) #* color of pixels in original image
 
         #### TEST ####
-        if i > 1 and (i % args.i_testset == 1 or i + 1 == args.epoch):
+        if i > 1 and (i != start and
+                      (i % args.i_testset == 0 or i + 1 == args.epoch)):
             testsavedir = os.path.join(basedir, expname,
                                        "testset_{:06d}".format(i))
             os.makedirs(testsavedir, exist_ok=True)
@@ -328,10 +336,9 @@ def main():
 
             # encode on test_set
 
-            # if args.enc_type != "none" and args.encode_test_views:
-            #     network.encode(
-            #         img_Tensor[i_fixed_test], poses[i_fixed_test], focal
-            #     )  # TODO
+            if args.enc_type != "none" and not args.not_encode_test_views:
+                network.encode(img_Tensor[i_fixed_test], poses[i_fixed_test],
+                               focal)  # TODO
 
             rgbs, disps = render_path(
                 # torch.Tensor(poses[i_test]).to(device) if type(poses)
@@ -346,13 +353,24 @@ def main():
 
             img_loss = img2mse(rgbs, images[i_test], keepdims=True)
             # trans = extras["raw"][..., -1]
-            psnr = mse2psnr(img_loss)
+            # calculate view-specific psnr
+            psnr = mse2psnr(img_loss).cpu().numpy()
+
             np.save(
                 os.path.join(basedir, expname,
                              "test_psnr_epoch_{:06d}".format(i)),
-                psnr.cpu().numpy(),
+                psnr,
             )
-            log = f"[TEST] Iter: {i} Loss: {img_loss.mean().item()}  PSNR: {psnr.mean().item()}\n"
+            # TODO
+            psnr_baseline = np.load(
+                'logs/PIXNERF/9views_viewdirs_raw__id0_instance_1_srn_car_traintest_resnet_6_0_viewasinput/test_psnr_epoch_010001.npy'
+            )
+            plt.plot(list(range(psnr_baseline.shape[0])), psnr_baseline)[0]
+            plt.plot(list(range(psnr.shape[0])), psnr)[0]
+            plt.savefig(os.path.join(psnr_savedir, f"iter_{i}.png"))
+            plt.clf()
+
+            log = f"[TEST] Iter: {i} Loss: {img_loss.mean().item()}  PSNR: {psnr.mean()}\n"
             print(log)
 
             writer.add_scalar("Loss/Test", img_loss.mean().item(), i)
