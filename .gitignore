@@ -13,3 +13,4 @@ configs
 mnist_train
 events*
 data/imagenet
+*.pth

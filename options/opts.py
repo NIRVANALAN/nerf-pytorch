@@ -480,3 +480,117 @@ def config_parser():
         default=None,
         help="where to inversion output, comes from train_test by default")
     return parser
+
+
+def prepare_proj_parser(parser):
+    usage = 'Parser for all scripts.'
+    # parser = argparse.ArgumentParser(
+    #     description="Image projector to the generator latent spaces")
+    parser.add_argument("--ckpt",
+                        type=str,
+                        required=True,
+                        help="path to the model checkpoint")
+    parser.add_argument("--size",
+                        type=int,
+                        default=128,
+                        help="output image sizes of the generator")
+    parser.add_argument(
+        "--lr_rampup",
+        type=float,
+        default=0.05,
+        help="duration of the learning rate warmup",
+    )
+    parser.add_argument(
+        "--lr_rampdown",
+        type=float,
+        default=0.25,
+        help="duration of the learning rate decay",
+    )
+    parser.add_argument("--lr", type=float, default=0.1, help="learning rate")
+    parser.add_argument("--noise",
+                        type=float,
+                        default=0.05,
+                        help="strength of the noise level")
+    parser.add_argument(
+        "--noise_ramp",
+        type=float,
+        default=0.75,
+        help="duration of the noise level decay",
+    )
+    parser.add_argument("--step",
+                        type=int,
+                        default=1000,
+                        help="optimize iterations")
+    parser.add_argument(
+        "--noise_regularize",
+        type=float,
+        default=1e5,
+        help="weight of the noise regularization",
+    )
+    parser.add_argument("--w_l1",
+                        type=float,
+                        default=0,
+                        help="weight of the l1 loss")
+    parser.add_argument("--w_l2",
+                        type=float,
+                        default=0,
+                        help="weight of the l1 loss")
+    parser.add_argument(
+        "--normalize_vgg_loss",
+        action="store_true",
+        help="normalize lpips by input image numbers",
+    )
+
+    return parser
+
+
+def add_proj_parser(parser):
+    parser.add_argument(
+        "--id_aware",
+        action="store_true",
+        help="shared id latent code for all input files",
+    )
+    parser.add_argument(
+        "--sample_range",
+        type=int,
+        default=50,
+        help="how many nerf samples to choose from",
+    )
+    parser.add_argument(
+        "--inject_index",
+        type=int,
+        default=4,
+        help="injection starts from which layer in W",
+    )
+    parser.add_argument("--proj_latent",
+                        type=str,
+                        default=None,
+                        help="path to the projected latent code")
+    parser.add_argument("--nerf_pred_path",
+                        type=str,
+                        default=None,
+                        help="path to the nerf prediction")
+    parser.add_argument(
+        "--nerf_psnr_path",
+        type=str,
+        default=None,
+        help="path to the nerf model psnr.npy, load for degraded img projection"
+    )
+    parser.add_argument("--sampling_range",
+                        type=int,
+                        default=50,
+                        help="sample range")
+    parser.add_argument("--sampling_numbers",
+                        type=int,
+                        default=5,
+                        help="sample numbers")
+    parser.add_argument("--sampling_strategy",
+                        type=str,
+                        default=None,
+                        help="how to sample?")
+    parser.add_argument(
+        "--d_loss",
+        action="store_true",
+        help="use discriminator_perceptual_loss",
+    )
+    return parser

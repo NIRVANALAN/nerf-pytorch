@@ -1,7 +1,7 @@
 import os
 from datetime import datetime
 import ipdb
-from options.opts import config_parser
+from options.opts import config_parser, add_proj_parser, prepare_proj_parser
 import numpy as np
 import imageio
 import time
@@ -31,14 +31,12 @@ now = datetime.now()
 
 def main():
     parser = config_parser()
+    parser = prepare_proj_parser(parser)
+    parser = add_proj_parser(parser)
+
     args = parser.parse_args()
-    # torch.set_deterministic(True)
     np.random.seed(0)
-    if args.torch_seed != -1:
-        torch.manual_seed(args.torch_seed)
-        print("torch random seed: {}".format(args.torch_seed))
-    else:
-        print("ignore torch.manul_seed")
+    torch.manual_seed(args.torch_seed)
 
     # Load data
 
@@ -109,64 +107,6 @@ def main():
     # Move testing data to GPU
     render_poses = todevice(render_poses)
 
-    # Short circuit if only rendering out from trained model
-    if args.render_only:
-        print("RENDER ONLY")
-        with torch.no_grad():
-            if args.render_test:
-                # render_test switches to test poses
-                images = images[i_test]
-            else:
-                # Default is smoother render_poses path
-                images = None
-
-            testsavedir = os.path.join(
-                basedir,
-                expname,
-                "renderonly_{}_{:06d}".format(
-                    "test" if args.render_test else "path", start),
-            )
-            os.makedirs(testsavedir, exist_ok=True)
-            print("test poses shape", render_poses.shape)
-
-            rgbs, _ = render_path(
-                render_poses,
-                hwf,
-                args.chunk,
-                render_kwargs_test,
-                gt_imgs=images,
-                savedir=testsavedir,
-                render_factor=args.render_factor,
-            )
-            print("Done rendering", testsavedir)
-            imageio.mimwrite(os.path.join(testsavedir, "video.mp4"),
-                             to8b(rgbs),
-                             fps=30,
-                             quality=8)
-
-            return
-
-    # Short circuit if only extracting mesh from trained model
-    if args.mesh_only:
-        mesh = extract_mesh(render_kwargs_test,
-                            mesh_grid_size=args.mesh_grid_size,
-                            threshold=50)
-
-        testsavedir = os.path.join(
-            basedir,
-            expname,
-            "renderonly_{}_{:06d}".format(
-                "test" if args.render_test else "path", start),
-        )
-        os.makedirs(testsavedir, exist_ok=True)
-        path = os.path.join(testsavedir, "mesh.obj")
-
-        print("saving mesh to ", path)
-
-        mesh.export(path)
-
-        return
-
     # Prepare raybatch tensor if batching random rays
     N_rand = args.N_rand
     use_batching = not args.no_batching
@@ -202,10 +142,7 @@ def main():
         # print("done")
         i_batch = 0
 
-    # print("Begin")
-    # print("TRAIN views are {}".format(i_train))
     print("TEST views number: {}".format(len(i_test)))
-    # print("VAL views are", i_val)  # TODO
     psnr_savedir = os.path.join(basedir, expname, 'psnr')
 
     os.makedirs(psnr_savedir, exist_ok=True)
@@ -221,11 +158,6 @@ def main():
     if start != args.epoch - 1:  # ease of use in test
         start += 1
 
-    if args.add_decoder:
-        criterion_ae = nn.MSELoss()
-
-        dataloader_iterator = iter(decoder_dataloader)
-
     # print
     print("i_fixed: {}".format(i_fixed))
     print("i_fixed_test: {}".format(i_fixed_test))
@@ -234,44 +166,6 @@ def main():
     selected_encode_idx = i_fixed
 
     for i in trange(start, args.epoch):
-
-        #! encoder
-        if (not args.decoder_only and args.enc_type != "none"):
-            assert img_Tensor != None
-            if network.encoder != None:
-                if network.random_encode:
-                    selected_encode_idx = torch.from_numpy(
-                        np.random.choice(len(i_train),
-                                         network.number_encode_view,
-                                         replace=False))
-
-                network.encode(img_Tensor[selected_encode_idx],
-                               poses[selected_encode_idx], focal)  # TODO
-
-        #! AE
-        if args.enc_type != "none" and args.add_decoder and args.ae_lambda > 0:
-
-            try:
-                if args.decoder_dataset == "imagenet":
-                    img_ae = next(dataloader_iterator)["img"]
-                else:
-                    img_ae = next(dataloader_iterator)[0]
-            except StopIteration:
-                dataloader_iterator = iter(decoder_dataloader)
-                if args.decoder_dataset == "imagenet":
-                    img_ae = next(dataloader_iterator)["img"]
-                else:
-                    img_ae = next(dataloader_iterator)[0]
-
-            img_ae = img_ae.cuda()
-            # ===================forward=====================
-            output_ae = network.encoder(img_ae, encode=False)[..., :3].permute(
-                0, 3, 1, 2)
-            ae_loss = img2mse(output_ae, img_ae)
-
-            # psnr_ae = mse2psnr(ae_loss)
-            writer.add_scalar("Loss_AE/train", ae_loss.item(), i)
-            # writer.add_scalar("PSNR_AE/train", psnr_ae.item(), i)
 
         # Sample random ray batch
         if use_batching:  # by default
@@ -425,17 +319,6 @@ def main():
                 path,
             )
             print("Saved checkpoints at", path)
-        # save image
-        # if args.add_decoder and (i % args.i_img == 0):
-        #     pic = to_img(
-        #         output_ae.detach().cpu(),
-        #         img_size=img_ae.shape[2],
-        #         channel=img_ae.shape[1],
-        #     )
-        #     save_image(
-        #         pic, os.path.join(basedir, expname, "AE", "iter_{}.png".format(i))
-        #     )
-        #     writer.add_images("test_AE_images", pic[:5], i)
 
         if i + 1 == args.epoch:
             break
@@ -470,13 +353,11 @@ def main():
 
         # trans = extras["raw"][..., -1]
         loss = img_loss
-        if args.add_decoder and args.ae_lambda > 0:
-            loss += args.ae_lambda * ae_loss
 
         if "rgb0" in extras:
             img_loss0 = img2mse(extras["rgb0"], target_s)
             loss = loss + img_loss0
-            psnr0 = mse2psnr(img_loss0)
+            # psnr0 = mse2psnr(img_loss0)
 
         loss.backward()
         optimizer.step()
@@ -501,8 +382,4 @@ def main():
 
 if __name__ == "__main__":
     torch.set_default_tensor_type("torch.cuda.FloatTensor")
-
-    # with profiler.profile(profile_memory=True, use_cuda=True) as prof: # memory leak here
     main()
-
-    # print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=10))
