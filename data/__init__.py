@@ -23,7 +23,7 @@ from .load_llff import *
 
 
 def create_dataset(args):
-    c, data, normalized_img_tensor, i_fixed, i_fixed_test = None, None, None, None, None
+    c, data, normalized_img_tensor, i_fixed, i_fixed_test, incremental_flags = None, None, None, None, None, None
     # decoder_images, decoder_images_normalized = None, None
     decoder_dataloader = None
 
@@ -170,7 +170,6 @@ def create_dataset(args):
         test_imgs = instance[-1]["images"][test_views, ...]
 
         # add incremental imgs
-
         if args.incremental_path != None:
             incremental_imgs_path = sorted(
                 glob.glob(args.incremental_path + '/*.png'))
@@ -185,10 +184,16 @@ def create_dataset(args):
             ])
             # add incremental imgs to train
             train_imgs = torch.cat([train_imgs, incremental_imgs], 0)
+            incremental_flags = torch.zeros(
+                (train_imgs.size(0))).to(train_imgs.device)
+            incremental_flags[-incremental_imgs.size(0):] = 1
             train_poses = torch.cat([
                 train_poses,
                 instance[-1]["poses"][incremental_ids, ...],
             ])
+        else:
+            incremental_flags = torch.zeros(
+                (train_imgs.size(0))).to(train_imgs.device)
 
         images = torch.cat([train_imgs, test_imgs], dim=0).float()
 
@@ -308,6 +313,7 @@ def create_dataset(args):
         i_train,
         i_val,
         i_test,
+        incremental_flags,
         near,
         far,
         c,

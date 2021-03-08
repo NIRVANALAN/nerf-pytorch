@@ -48,8 +48,9 @@ def main():
 
     # Load data
 
-    (images, poses, render_poses, hwf, i_train, i_val, i_test, near, far, c,
-     data, img_Tensor, i_fixed, i_fixed_test, decoder_dataloader
+    (images, poses, render_poses, hwf, i_train, i_val, i_test,
+     incremental_flags, near, far, c, data, img_Tensor, i_fixed, i_fixed_test,
+     decoder_dataloader
      # decoder_imgs,
      # decoder_imgs_normalized,
      ) = create_dataset(args)
@@ -192,6 +193,11 @@ def main():
         rays_rgb = rays_rgb.permute(0, 2, 3, 1, 4)  # [N, H, W, ro+rd+rgb, 3]
         rays_rgb = torch.stack([rays_rgb[i] for i in i_train],
                                0)  # train images only
+        incremental_flags_indices = torch.nonzero(
+            incremental_flags).squeeze()  # get nonzero indices
+        incremental_flags = torch.zeros(rays_rgb.shape[:-1]).long()
+        incremental_flags[incremental_flags_indices,
+                          ...] = 1  # bool mask matrix
 
         rays_rgb = rays_rgb.view(-1, 3, 3)
         # rays_rgb = torch.reshape(rays_rgb, [-1, 3, 3])  # [(N-1)*H*W, ro+rd+rgb, 3]
@@ -278,6 +284,8 @@ def main():
             # Random over all images
             batch = rays_rgb[i_batch:i_batch + N_rand]  # [B, 2+1, 3*?]
             batch = torch.transpose(batch, 0, 1)
+            batch_incremental_flag = incremental_flags[i_batch:i_batch +
+                                                       N_rand]
             batch_rays, target_s = batch[:2], batch[2]
 
             i_batch += N_rand
@@ -451,9 +459,22 @@ def main():
         )
 
         optimizer.zero_grad()
-        img_loss = img2mse(rgb, target_s)
+
+        # img_loss = img2mse(
+        #     rgb,
+        #     target_s,
+        # )
+
+        if args.incremental_path != None:
+            img_loss = img2mse(rgb, target_s, keepdim=True)
+            img_loss = (img_loss * batch_incremental_flag).mean() + (
+                img_loss * (1 - batch_incremental_flag)).mean() * args.w_gt
+        else:
+            img_loss = img2mse(rgb, target_s)
+
+        psnr = mse2psnr(img_loss.mean().detach())
+
         # trans = extras["raw"][..., -1]
-        psnr = mse2psnr(img_loss)
         loss = img_loss
         if args.add_decoder and args.ae_lambda > 0:
             loss += args.ae_lambda * ae_loss
