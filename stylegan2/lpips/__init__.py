@@ -2,12 +2,15 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+import sys
+sys.path.append('stylegan2')
+sys.path.append('stylegan2/lpips')
 import numpy as np
 from skimage.measure import compare_ssim
 import torch
 from torch.autograd import Variable
 
-from lpips import dist_model
+from . import dist_model
 from .d_loss import DiscriminatorLoss
 
 

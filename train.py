@@ -1,5 +1,6 @@
 import os
 from datetime import datetime
+from re import S
 import ipdb
 from options.opts import config_parser
 import numpy as np
@@ -194,12 +195,16 @@ def main():
                           ...] = 1  # bool mask matrix
 
         rays_rgb = rays_rgb.view(-1, 3, 3)
+        incremental_flags = incremental_flags.view(-1, 3)
         # rays_rgb = torch.reshape(rays_rgb, [-1, 3, 3])  # [(N-1)*H*W, ro+rd+rgb, 3]
 
-        rays_rgb = rays_rgb[torch.randperm(
-            rays_rgb.size(0))]  # * shuffle along the first axis
+        # shuffle along the first axis
+        perm_randidx = torch.randperm(rays_rgb.size(0))
+        rays_rgb = rays_rgb[perm_randidx]
+        incremental_flags = incremental_flags[perm_randidx]
+
         rays_rgb = todevice(rays_rgb)
-        # print("done")
+        incremental_flags = todevice(incremental_flags)
         i_batch = 0
 
     # print("Begin")

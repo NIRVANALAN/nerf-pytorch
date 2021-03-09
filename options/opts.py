@@ -240,7 +240,7 @@ def config_parser():
     parser.add_argument(
         "--epoch",
         type=int,
-        default=200000,
+        default=50000,
         help="frequency of console printout and metric loggin",
     )
     parser.add_argument(
@@ -592,5 +592,15 @@ def add_proj_parser(parser):
         "--d_loss",
         action="store_true",
         help="use discriminator_perceptual_loss",
+    )
+    parser.add_argument("--cotraining_stage",
+                        type=int,
+                        default=5,
+                        help="how many stages to perform gan-nerf cotraining")
+    parser.add_argument(
+        "--cotraining_epoch",
+        type=int,
+        default=10000,
+        help="frequency of console printout and metric loggin",
     )
     return parser

@@ -17,9 +17,59 @@ from .load_blender import *
 from .load_deepvoxels import *
 from .load_llff import *
 
-# from
 
-# __all__=[*]
+class Incremental_dataset():
+    # this class serves for dynamic training_data update during co-training
+    def __init__(self, test_instance, verbose=True) -> None:
+        self.test_instance = test_instance
+        self.verbose = verbose
+        self.train_imgs = None
+        self.train_poses = None
+        self.incremenfal_flags = None
+
+    def update_rays():
+        pass
+
+    def incremental_update_data(
+        self,
+        incremental_path,
+        train_imgs,
+        train_poses,
+        incremental_flags=None,
+    ):
+        incremental_imgs_path = sorted(glob.glob(incremental_path + '/*.png'))
+        incremental_ids = np.array([
+            int(rgb_path.split('/')[-1].split('_')[0])
+            for rgb_path in incremental_imgs_path
+        ])
+        if self.verbose:
+            print('add incremental imgs id: {}'.format(incremental_ids))
+
+        incremental_imgs = torch.stack([
+            torch.from_numpy(imageio.imread(rgb_path)[..., :3] / 255)
+            for rgb_path in incremental_imgs_path
+        ])
+
+        train_imgs = torch.cat([train_imgs, incremental_imgs], 0)
+        train_poses = torch.cat([
+            train_poses,
+            self.test_instance["poses"][incremental_ids, ...],
+        ])
+
+        # add incremental imgs to train
+        if incremental_flags == None:
+            incremental_flags = torch.zeros(
+                (train_imgs.size(0))).to(train_imgs.device)
+            incremental_flags[-incremental_imgs.size(0):] = 1
+        else: # concat new incremental-imgs
+            new_flags = torch.ones((incremental_imgs.shzpe[0], *incremental_flags.shape[1:])) # maintain shape
+            incremental_flags = torch.cat([incremental_flags, new_flags])
+
+        self.train_imgs = train_imgs
+        self.train_poses = train_poses
+        self.incremenfal_flags = incremental_flags
+
+        return incremental_flags, train_imgs, train_poses
 
 
 def create_dataset(args):
@@ -147,16 +197,6 @@ def create_dataset(args):
                 raise NotImplementedError("no {} sampling stategy".format(
                     args.external_sampling))
 
-        # np.array(range(views_avai)) [ :: views_avai // args.srn_input_views ]
-
-        # extend fixed encode views
-        # if args.enc_type != 'none' :
-        #     encode_view_ids = list(map(int(args.srn_encode_views_id)))
-        #     for enc_id in encode_view_ids:
-        #         if enc_id not in input_views_ids:
-        #             input_views_ids.extend(encode_view_ids)
-        # input_views_ids = np.array(input_views_ids)
-
         test_views = np.linspace(1,
                                  test_views_avai,
                                  test_views_avai,
@@ -165,32 +205,17 @@ def create_dataset(args):
         # np.random.choice(np.arange(views_avai), size=args.srn_input_views)
         # input_views_id = (0, 38)  # try input views id = [0, 38]
 
-        train_poses = instance[0]["poses"][input_views_ids, ...]
+        train_poses = instance[0]["poses"][input_views_ids, ...][:, :3, :4]
         train_imgs = instance[0]["images"][input_views_ids, ...]
         test_imgs = instance[-1]["images"][test_views, ...]
 
+        # init incremental dataset for co-training
+        incremental_dataset = Incremental_dataset(instance[-1])
+
         # add incremental imgs
         if args.incremental_path != None:
-            incremental_imgs_path = sorted(
-                glob.glob(args.incremental_path + '/*.png'))
-            incremental_ids = np.array([
-                int(rgb_path.split('/')[-1].split('_')[0])
-                for rgb_path in incremental_imgs_path
-            ])
-            print('add incremental imgs id: {}'.format(incremental_ids))
-            incremental_imgs = torch.stack([
-                torch.from_numpy(imageio.imread(rgb_path)[..., :3] / 255)
-                for rgb_path in incremental_imgs_path
-            ])
-            # add incremental imgs to train
-            train_imgs = torch.cat([train_imgs, incremental_imgs], 0)
-            incremental_flags = torch.zeros(
-                (train_imgs.size(0))).to(train_imgs.device)
-            incremental_flags[-incremental_imgs.size(0):] = 1
-            train_poses = torch.cat([
-                train_poses,
-                instance[-1]["poses"][incremental_ids, ...],
-            ])
+            incremental_flags, train_imgs, train_poses = incremental_dataset.incremental_update_data(
+                args.incremental_path, train_imgs, train_poses, instance[-1])
         else:
             incremental_flags = torch.zeros(
                 (train_imgs.size(0))).to(train_imgs.device)
@@ -200,12 +225,12 @@ def create_dataset(args):
         normalized_img_tensor = image_to_normalized_tensor(  # TODO
             images.permute(0, 3, 1, 2)).float()  # 250 * 3 * 128 * 128
 
-        poses = torch.cat([
-            train_poses,
-            instance[-1]["poses"][test_views, ...],
-        ], )
+        # poses = torch.cat([
+        # train_poses,
+        test_poses = instance[-1]["poses"][test_views, ...][:, :3, :4]
+        # ], )
 
-        poses = poses[:, :3, :4]  #!
+        # poses = poses[:, :3, :4]  #!
 
         i_train = np.arange(0, train_imgs.shape[0]).tolist()
         i_test = np.arange(train_imgs.shape[0], images.size(0)).tolist()
@@ -305,23 +330,11 @@ def create_dataset(args):
                                   "exiting")
     print("NEAR FAR", near, far)
 
-    return (
-        images,
-        poses,
-        render_poses,
-        hwf,
-        i_train,
-        i_val,
-        i_test,
-        incremental_flags,
-        near,
-        far,
-        c,
-        data,
-        normalized_img_tensor,
-        i_fixed,
-        i_fixed_test,
-        # decoder_images,
-        # decoder_images_normalized,
-        decoder_dataloader,
-    )
+    return {
+        images, render_poses, hwf, i_train, i_val, i_test, incremental_flags,
+        near, far, c, data, normalized_img_tensor, i_fixed, i_fixed_test,
+        decoder_dataloader, {
+            'meta_data': (train_imgs, test_imgs, train_poses, test_poses,
+                          incremental_dataset)
+        }
+    }
