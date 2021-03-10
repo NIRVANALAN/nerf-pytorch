@@ -27,7 +27,8 @@ class Incremental_dataset(Dataset):
                  train_poses,
                  test_instance,
                  intrinsics,
-                 verbose=True,device='cuda') -> None:
+                 verbose=True,
+                 device='cuda') -> None:
         # init with NeRF GT train_imgs, test_imgs
         self.test_instance = test_instance  # TODO
         self.verbose = verbose
@@ -41,7 +42,7 @@ class Incremental_dataset(Dataset):
         # ipdb.set_trace()
 
     # @ staticmethod
-    def build_rays_rgb(self, imgs, poses):
+    def build_rays_rgb(self, imgs, poses, shuffle_init=True):
         # ugly code
         rays = torch.stack(  # TODO
             [
@@ -54,6 +55,9 @@ class Incremental_dataset(Dataset):
         rays_rgb = rays_rgb.permute(0, 2, 3, 1, 4)  # [N, H, W, ro+rd+rgb, 3]
         # rays_rgb = rays_rgb.view(-1, 3, 3) # [NHW, ro+rd+rgb, 3]
         rays_rgb = torch.reshape(rays_rgb, (-1, 3, 3))  # [NHW, ro+rd+rgb, 3]
+        if shuffle_init:
+            rays_rgb = rays_rgb[torch.randperm(rays_rgb.size(0))]
+
         return rays_rgb
 
     def __len__(self):
@@ -62,8 +66,9 @@ class Incremental_dataset(Dataset):
     def __getitem__(self, idx):
         sample = self.rays_rgb[idx]  # [2+1, 3*?]
         flag = self.flags[idx]
-        rays, target = sample[:2], sample[2]
-        return rays, target, flag
+        return sample, flag
+        # rays, target = sample[:2], sample[2]
+        # return rays, target, flag
 
     # dynamically update data, add data(img, pose) from inversion
     def incremental_update_data(
@@ -87,15 +92,18 @@ class Incremental_dataset(Dataset):
 
         incremental_rays_rgb = self.build_rays_rgb(incremental_imgs,
                                                    incremental_poses)
+        return incremental_rays_rgb
 
         # needs ablation study
-        self.imgs = torch.cat([self.imgs, incremental_imgs], 0)
-        self.poses = torch.cat([self.poses, incremental_poses])
+
+        # self.imgs = torch.cat([self.imgs, incremental_imgs], 0)
+        # self.poses = torch.cat([self.poses, incremental_poses])
 
         # concat new incremental-imgs
-        new_flags = torch.ones((incremental_imgs.shape[0],
-                                *self.rays_rgb.shape[1:-1]))  # maintain shape
-        self.flags = torch.cat([self.flags, new_flags])
+
+        # new_flags = torch.ones((incremental_imgs.shape[0],
+        #                         *self.rays_rgb.shape[1:-1]))  # maintain shape
+        # self.flags = torch.cat([self.flags, new_flags])
 
 
 def create_dataset(args):
