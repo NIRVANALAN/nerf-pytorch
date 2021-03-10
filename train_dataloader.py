@@ -2,6 +2,7 @@ import os
 from datetime import datetime
 from re import S
 import ipdb
+from torch.utils.data.dataloader import DataLoader
 from options.opts import config_parser
 import numpy as np
 import imageio
@@ -13,21 +14,18 @@ import trimesh
 from pathlib import Path
 import mcubes
 
+import torch.multiprocessing as mp
 import matplotlib.pyplot as plt
 
 from util import *
 
 from models import *
-from data import create_dataset
+from data import Incremental_dataset, create_dataset
 
 from torch.utils.tensorboard import SummaryWriter
 
-torch.set_default_tensor_type("torch.cuda.FloatTensor")
-
 now = datetime.now()
 # set seed
-
-# print = lambda x: print(*x, flush=True)
 
 
 def main():
@@ -42,16 +40,22 @@ def main():
         print("ignore torch.manul_seed")
 
     # Load data
+
     (images, poses, render_poses, hwf, i_train, i_val, i_test, near, far, c,
      data, img_Tensor, i_fixed, i_fixed_test, meta_data
      # decoder_imgs,
      # decoder_imgs_normalized,
      ) = create_dataset(args)
 
+    poses = todevice(poses)
+    images = todevice(images)
+
+    _, _, _, _, incremental_dataset = meta_data
+
     # Cast intrinsics to right types
     H, W, focal = hwf
     H, W = int(H), int(W)
-    hwf = [H, W, focal]
+    hwf = [H, W, todevice(focal)]
 
     args.chunk //= len(args.srn_encode_views_id.split())
 
@@ -170,41 +174,6 @@ def main():
     N_rand = args.N_rand
     use_batching = not args.no_batching
 
-    # Move training data to GPU
-    images = todevice(images)
-    poses = todevice(poses)
-
-    if use_batching:
-        # For random ray batching
-        # print("get rays")
-        rays = torch.stack(  # TODO
-            [get_rays(H, W, focal, p, c) for p in poses[:, :3, :4]],
-            0)  # [N, ro+rd, H, W, 3] #?
-
-        rays_rgb = torch.cat([rays, images[:, None]],
-                             1)  # [N, ro+rd+rgb, H, W, 3]
-        rays_rgb = rays_rgb.permute(0, 2, 3, 1, 4)  # [N, H, W, ro+rd+rgb, 3]
-        rays_rgb = torch.stack([rays_rgb[i] for i in i_train],
-                               0)  # train images only
-        # incremental_flags_indices = torch.nonzero(
-        #     incremental_flags).squeeze()  # get nonzero indices
-        # incremental_flags = torch.zeros(rays_rgb.shape[:-1]).long()
-        # incremental_flags[incremental_flags_indices,
-        #                   ...] = 1  # bool mask matrix
-
-        rays_rgb = rays_rgb.view(-1, 3, 3)
-        # incremental_flags = incremental_flags.view(-1, 3)
-        # rays_rgb = torch.reshape(rays_rgb, [-1, 3, 3])  # [(N-1)*H*W, ro+rd+rgb, 3]
-
-        # shuffle along the first axis
-        perm_randidx = torch.randperm(rays_rgb.size(0))
-        rays_rgb = rays_rgb[perm_randidx]
-        # incremental_flags = incremental_flags[perm_randidx]
-
-        rays_rgb = todevice(rays_rgb)
-        # incremental_flags = todevice(incremental_flags)
-        i_batch = 0
-
     # print("Begin")
     # print("TRAIN views are {}".format(i_train))
     print("TEST views number: {}".format(len(i_test)))
@@ -224,11 +193,6 @@ def main():
     if start != args.epoch - 1:  # ease of use in test
         start += 1
 
-    if args.add_decoder:
-        criterion_ae = nn.MSELoss()
-
-        dataloader_iterator = iter(decoder_dataloader)
-
     # print
     print("i_fixed: {}".format(i_fixed))
     print("i_fixed_test: {}".format(i_fixed_test))
@@ -236,49 +200,26 @@ def main():
     # TOOD, init encoder imgs
     selected_encode_idx = i_fixed
 
+    # already put dataset onto gpu
+    train_dataloader = DataLoader(incremental_dataset,
+                                  batch_size=N_rand,
+                                  shuffle=True,
+                                  num_workers=0,
+                                  pin_memory=False)
+
     for i in trange(start, args.epoch):
-
-        #! encoder
-        if (not args.decoder_only and args.enc_type != "none"):
-            assert img_Tensor != None
-            if network.encoder != None:
-                if network.random_encode:
-                    selected_encode_idx = torch.from_numpy(
-                        np.random.choice(len(i_train),
-                                         network.number_encode_view,
-                                         replace=False))
-
-                network.encode(img_Tensor[selected_encode_idx],
-                               poses[selected_encode_idx], focal)  # TODO
-
-        #! AE
-        if args.enc_type != "none" and args.add_decoder and args.ae_lambda > 0:
-
-            try:
-                if args.decoder_dataset == "imagenet":
-                    img_ae = next(dataloader_iterator)["img"]
-                else:
-                    img_ae = next(dataloader_iterator)[0]
-            except StopIteration:
-                dataloader_iterator = iter(decoder_dataloader)
-                if args.decoder_dataset == "imagenet":
-                    img_ae = next(dataloader_iterator)["img"]
-                else:
-                    img_ae = next(dataloader_iterator)[0]
-
-            img_ae = img_ae.cuda()
-            # ===================forward=====================
-            output_ae = network.encoder(img_ae, encode=False)[..., :3].permute(
-                0, 3, 1, 2)
-            ae_loss = img2mse(output_ae, img_ae)
-
-            # psnr_ae = mse2psnr(ae_loss)
-            writer.add_scalar("Loss_AE/train", ae_loss.item(), i)
-            # writer.add_scalar("PSNR_AE/train", psnr_ae.item(), i)
 
         # Sample random ray batch
         if use_batching:  # by default
             # Random over all images
+            batch = next(iter(train_dataloader))
+
+            batch_rays, target_s, flag = map(todevice, batch)
+            batch_rays = torch.transpose(batch_rays, 0, 1)  # 2 * BS * 3
+
+            # import ipdb
+            # ipdb.set_trace()
+            '''
             batch = rays_rgb[i_batch:i_batch + N_rand]  # [B, 2+1, 3*?]
             batch = torch.transpose(batch, 0, 1)
             # batch_incremental_flag = incremental_flags[i_batch:i_batch +
@@ -291,6 +232,7 @@ def main():
                 rand_idx = torch.randperm(rays_rgb.shape[0])
                 rays_rgb = rays_rgb[rand_idx]
                 i_batch = 0
+            # '''
 
         else:
             # Random from one image
@@ -428,17 +370,6 @@ def main():
                 path,
             )
             print("Saved checkpoints at", path)
-        # save image
-        # if args.add_decoder and (i % args.i_img == 0):
-        #     pic = to_img(
-        #         output_ae.detach().cpu(),
-        #         img_size=img_ae.shape[2],
-        #         channel=img_ae.shape[1],
-        #     )
-        #     save_image(
-        #         pic, os.path.join(basedir, expname, "AE", "iter_{}.png".format(i))
-        #     )
-        #     writer.add_images("test_AE_images", pic[:5], i)
 
         if i + 1 == args.epoch:
             break
@@ -457,11 +388,6 @@ def main():
 
         optimizer.zero_grad()
 
-        # img_loss = img2mse(
-        #     rgb,
-        #     target_s,
-        # )
-
         # if args.incremental_path != None:
         #     img_loss = img2mse(rgb, target_s, keepdim=True)
         #     img_loss = (img_loss * batch_incremental_flag).mean() + (
@@ -473,8 +399,6 @@ def main():
 
         # trans = extras["raw"][..., -1]
         loss = img_loss
-        if args.add_decoder and args.ae_lambda > 0:
-            loss += args.ae_lambda * ae_loss
 
         if "rgb0" in extras:
             img_loss0 = img2mse(extras["rgb0"], target_s)
@@ -503,9 +427,6 @@ def main():
 
 
 if __name__ == "__main__":
+    mp.set_start_method('spawn')
     torch.set_default_tensor_type("torch.cuda.FloatTensor")
-
-    # with profiler.profile(profile_memory=True, use_cuda=True) as prof: # memory leak here
     main()
-
-    # print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=10))

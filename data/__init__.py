@@ -10,7 +10,7 @@ import torch
 from mmcls.datasets import build_dataloader, build_dataset
 from mmcv import DictAction
 from torch.utils.data import DataLoader, Dataset, TensorDataset
-from util import image_to_normalized_tensor
+from util import image_to_normalized_tensor, todevice
 from util.run_nerf_helpers import get_rays
 
 from .data_util import get_split_dataset  # ColorJitterDataset
@@ -22,18 +22,27 @@ from .load_llff import *
 class Incremental_dataset(Dataset):
     # this class serves for dynamic training_data update during co-training
     # dynamically add from inversion past, and set incremental_img_flag
-    def __init__(self, train_imgs, train_poses, test_instance, intrinsics, verbose=True) -> None:
+    def __init__(self,
+                 train_imgs,
+                 train_poses,
+                 test_instance,
+                 intrinsics,
+                 verbose=True,device='cuda') -> None:
         # init with NeRF GT train_imgs, test_imgs
-        self.test_instance = test_instance # TODO
+        self.test_instance = test_instance  # TODO
         self.verbose = verbose
-        self.imgs = train_imgs
-        self.poses = train_poses
+        self.imgs = train_imgs.to(device)
+        self.poses = train_poses.to(device)
         self.h, self.w, self.focal, self.c = intrinsics
         self.rays_rgb = self.build_rays_rgb(self.imgs, self.poses)
-        self.flags = torch.zeros(self.rays_rgb.shape[:-1]).long() # 0 denotes from original NeRF dataset
+        self.flags = torch.zeros(self.rays_rgb.shape[:-1]).cpu().long(
+        )  # 0 denotes from original NeRF dataset
+        # import ipdb
+        # ipdb.set_trace()
 
     # @ staticmethod
     def build_rays_rgb(self, imgs, poses):
+        # ugly code
         rays = torch.stack(  # TODO
             [
                 get_rays(self.h, self.w, self.focal, p, self.c)
@@ -44,7 +53,7 @@ class Incremental_dataset(Dataset):
                              1)  # [N, ro+rd+rgb, H, W, 3]
         rays_rgb = rays_rgb.permute(0, 2, 3, 1, 4)  # [N, H, W, ro+rd+rgb, 3]
         # rays_rgb = rays_rgb.view(-1, 3, 3) # [NHW, ro+rd+rgb, 3]
-        rays_rgb = torch.reshape(rays_rgb, (-1, 3, 3)) # [NHW, ro+rd+rgb, 3]
+        rays_rgb = torch.reshape(rays_rgb, (-1, 3, 3))  # [NHW, ro+rd+rgb, 3]
         return rays_rgb
 
     def __len__(self):
@@ -59,7 +68,8 @@ class Incremental_dataset(Dataset):
     # dynamically update data, add data(img, pose) from inversion
     def incremental_update_data(
         self,
-        incremental_path,):
+        incremental_path,
+    ):
         # search for incremental data to be added
         incremental_imgs_path = sorted(glob.glob(incremental_path + '/*.png'))
         incremental_ids = np.array([
@@ -75,19 +85,16 @@ class Incremental_dataset(Dataset):
         ])
         incremental_poses = self.test_instance["poses"][incremental_ids, ...],
 
-        incremental_rays_rgb = self.build_rays_rgb(incremental_imgs, incremental_poses)
+        incremental_rays_rgb = self.build_rays_rgb(incremental_imgs,
+                                                   incremental_poses)
 
         # needs ablation study
         self.imgs = torch.cat([self.imgs, incremental_imgs], 0)
-        self.poses = torch.cat([
-            self.poses,
-            incremental_poses
-        ])
+        self.poses = torch.cat([self.poses, incremental_poses])
 
         # concat new incremental-imgs
-        new_flags = torch.ones(
-            (incremental_imgs.shape[0],
-                *self.rays_rgb.shape[1:-1]))  # maintain shape
+        new_flags = torch.ones((incremental_imgs.shape[0],
+                                *self.rays_rgb.shape[1:-1]))  # maintain shape
         self.flags = torch.cat([self.flags, new_flags])
 
 
@@ -274,7 +281,10 @@ def create_dataset(args):
         data = instance[0]
 
         # init incremental dataset for co-training
-        incremental_dataset = Incremental_dataset(train_imgs, train_poses,instance[-1], intrinsics=[*hwf, c])
+        incremental_dataset = Incremental_dataset(train_imgs,
+                                                  train_poses,
+                                                  instance[-1],
+                                                  intrinsics=[*hwf, c])
 
         print("object id: {} | input view id: {}".format(
             data["path"], input_views_ids))
@@ -347,9 +357,8 @@ def create_dataset(args):
                                   "exiting")
     print("NEAR FAR", near, far)
 
-    return (images, poses, render_poses, hwf, i_train, i_val, i_test,
-            near, far, c, data, normalized_img_tensor,
-            i_fixed, i_fixed_test, [
+    return (images, poses, render_poses, hwf, i_train, i_val, i_test, near,
+            far, c, data, normalized_img_tensor, i_fixed, i_fixed_test, [
                 train_imgs, test_imgs, train_poses, test_poses,
                 incremental_dataset
             ])

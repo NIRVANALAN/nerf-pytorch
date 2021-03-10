@@ -48,8 +48,7 @@ class SRNDataset(torch.utils.data.Dataset):
         self.image_size = image_size
         self.world_scale = world_scale
         self._coord_trans = torch.diag(
-            torch.tensor([1, -1, -1, 1], dtype=torch.float32)
-        )
+            torch.tensor([1, -1, -1, 1], dtype=torch.float32)).cpu()
 
         if is_chair:
             self.z_near = 1.25
@@ -93,8 +92,8 @@ class SRNDataset(torch.utils.data.Dataset):
             mask_tensor = self.mask_to_tensor(mask)
 
             pose = torch.from_numpy(
-                np.loadtxt(pose_path, dtype=np.float32).reshape(4, 4)
-            ).to(self._coord_trans.device)
+                np.loadtxt(pose_path, dtype=np.float32).reshape(
+                    4, 4))  #.to(self._coord_trans.device)
             pose = pose @ self._coord_trans
 
             rows = np.any(mask, axis=1)
@@ -241,8 +240,8 @@ class SceneInstanceDataset:
         rgb = rgb.reshape(3, -1).transpose(1, 0)
 
         pose = torch.from_numpy(
-            np.loadtxt(self.pose_paths[idx], dtype=np.float32).reshape(4, 4)
-        ).to(self._coord_trans.device)
+            np.loadtxt(self.pose_paths[idx], dtype=np.float32).reshape(
+                4, 4))  #.to(self._coord_trans.device)
         pose = pose @ self._coord_trans
 
         data_util.load_pose(self.pose_paths[idx])

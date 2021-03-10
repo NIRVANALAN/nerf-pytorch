@@ -11,7 +11,7 @@ import warnings
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 todevice = (
-    lambda x: x.to(device)
+    lambda x: x.to(device, non_blocking=True)
     if type(x) is torch.Tensor else torch.Tensor(x).to(device)
 )  # for compatibility. torch.Tensor(tensor) will fail if tensor already on cuda
 

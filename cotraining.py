@@ -21,6 +21,7 @@ from models import *
 from options.opts import add_proj_parser, config_parser, prepare_proj_parser
 from stylegan2.projector import project
 from util import *
+from torch.utils.data import DataLoader,
 
 torch.set_default_tensor_type("torch.cuda.FloatTensor")
 
@@ -37,9 +38,8 @@ def main():
     torch.manual_seed(args.torch_seed)
 
     # Load data
-    (images, poses, render_poses, hwf, i_train, i_val, i_test,
-    near, far, c, data, img_Tensor, i_fixed, i_fixed_test,
-     meta_data) = create_dataset(args)
+    (images, poses, render_poses, hwf, i_train, i_val, i_test, near, far, c,
+     data, img_Tensor, i_fixed, i_fixed_test, meta_data) = create_dataset(args)
     (train_imgs, test_imgs, train_poses, test_poses,
      incremental_dataset) = meta_data
 
@@ -122,34 +122,34 @@ def main():
     train_imgs, train_poses, test_imgs, test_poses = list(
         map(todevice, [train_imgs, train_poses, test_imgs, test_poses]))
 
-    if use_batching:
-        # For random ray batching
-        # print("get rays")
-        rays = torch.stack(  # TODO
-            [get_rays(H, W, focal, p, c) for p in train_poses[:, :3, :4]],
-            0)  # [N, ro+rd, H, W, 3] #?
+    # if use_batching:
+    #     # For random ray batching
+    #     # print("get rays")
+    #     rays = torch.stack(  # TODO
+    #         [get_rays(H, W, focal, p, c) for p in train_poses[:, :3, :4]],
+    #         0)  # [N, ro+rd, H, W, 3] #?
 
-        rays_rgb = torch.cat([rays, train_imgs[:, None]],
-                             1)  # [N, ro+rd+rgb, H, W, 3]
+    #     rays_rgb = torch.cat([rays, train_imgs[:, None]],
+    #                          1)  # [N, ro+rd+rgb, H, W, 3]
 
-        rays_rgb = rays_rgb.permute(0, 2, 3, 1, 4)  # [N, H, W, ro+rd+rgb, 3]
-        # rays_rgb = torch.stack([rays_rgb[i] for i in i_train],
-        #                        0)  # train images only
-        incremental_flags_indices = torch.nonzero(
-            incremental_flags).squeeze()  # get nonzero indices
-        incremental_flags = torch.zeros(rays_rgb.shape[:-1]).long()
-        incremental_flags[incremental_flags_indices,
-                          ...] = 1  # bool mask matrix
+    #     rays_rgb = rays_rgb.permute(0, 2, 3, 1, 4)  # [N, H, W, ro+rd+rgb, 3]
+    #     # rays_rgb = torch.stack([rays_rgb[i] for i in i_train],
+    #     #                        0)  # train images only
+    #     incremental_flags_indices = torch.nonzero(
+    #         incremental_flags).squeeze()  # get nonzero indices
+    #     incremental_flags = torch.zeros(rays_rgb.shape[:-1]).long()
+    #     incremental_flags[incremental_flags_indices,
+    #                       ...] = 1  # bool mask matrix
 
-        rays_rgb = rays_rgb.view(-1, 3, 3)
-        # rays_rgb = torch.reshape(rays_rgb, [-1, 3, 3])  # [(N-1)*H*W, ro+rd+rgb, 3]
+    #     rays_rgb = rays_rgb.view(-1, 3, 3)
+    #     # rays_rgb = torch.reshape(rays_rgb, [-1, 3, 3])  # [(N-1)*H*W, ro+rd+rgb, 3]
 
-        # shuffle
-        perm_randidx = torch.randperm(rays_rgb.size(0))
-        rays_rgb = rays_rgb[perm_randidx]
-        incremental_flags = incremental_flags[perm_randidx]
-        # print("done")
-        i_batch = 0
+    #     # shuffle
+    #     perm_randidx = torch.randperm(rays_rgb.size(0))
+    #     rays_rgb = rays_rgb[perm_randidx]
+    #     incremental_flags = incremental_flags[perm_randidx]
+    #     # print("done")
+    #     i_batch = 0
 
     print("TEST views number: {}".format(test_imgs.shape[0]))
     psnr_savedir = os.path.join(basedir, expname, 'psnr')
@@ -177,7 +177,7 @@ def main():
             if use_batching:  # by default
                 # Random over all images
                 batch = rays_rgb[i_batch:i_batch + N_rand]  # [B, 2+1, 3*?]
-                batch = torch.transpose(batch, 0, 1) # [2+1, B, 3]
+                batch = torch.transpose(batch, 0, 1)  # [2+1, B, 3]
                 batch_incremental_flag = incremental_flags[i_batch:i_batch +
                                                            N_rand]
                 batch_rays, target_s = batch[:2], batch[2]
@@ -204,11 +204,6 @@ def main():
             )
 
             optimizer.zero_grad()
-
-            # img_loss = img2mse(
-            #     rgb,
-            #     target_s,
-            # )
 
             if args.incremental_path != None:
                 img_loss = img2mse(rgb, target_s, keepdim=True)

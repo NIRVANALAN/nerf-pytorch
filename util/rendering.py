@@ -65,9 +65,10 @@ def render_rays(
     bounds = torch.reshape(ray_batch[..., 6:8], [-1, 1, 2])
     near, far = bounds[..., 0], bounds[..., 1]  # [-1,1]
 
-    t_vals = torch.linspace(0.0, 1.0, steps=N_samples)
+    t_vals = torch.linspace(0.0, 1.0, steps=N_samples).to(near.device)
     if not lindisp:  # disparity. depth=1/disp first
-        z_vals = near * (1.0 - t_vals) + far * (t_vals)  # bilinear interpolation
+        z_vals = near * (1.0 - t_vals) + far * (t_vals
+                                                )  # bilinear interpolation
     else:
         z_vals = 1.0 / (1.0 / near * (1.0 - t_vals) + 1.0 / far * (t_vals))
 
@@ -90,15 +91,18 @@ def render_rays(
         z_vals = lower + (upper - lower) * t_rand
 
     pts = (
-        rays_o[..., None, :]
-        + rays_d[..., None, :] * z_vals[..., :, None]  # origion + direction * interval
+        rays_o[..., None, :] + rays_d[..., None, :] *
+        z_vals[..., :, None]  # origion + direction * interval
     )  # [N_rays, N_samples, 3]
 
     #     raw = NetworkSystem.run_network(pts)
     raw = network_query_fn(pts, viewdirs, network_fn)  # TODO
-    rgb_map, disp_map, acc_map, weights, depth_map = raw2outputs(
-        raw, z_vals, rays_d, raw_noise_std, white_bkgd, pytest=pytest
-    )
+    rgb_map, disp_map, acc_map, weights, depth_map = raw2outputs(raw,
+                                                                 z_vals,
+                                                                 rays_d,
+                                                                 raw_noise_std,
+                                                                 white_bkgd,
+                                                                 pytest=pytest)
 
     if N_importance > 0:
 
@@ -115,17 +119,16 @@ def render_rays(
         z_samples = z_samples.detach()
 
         z_vals, _ = torch.sort(torch.cat([z_vals, z_samples], -1), -1)
-        pts = (
-            rays_o[..., None, :] + rays_d[..., None, :] * z_vals[..., :, None]
-        )  # [N_rays, N_samples + N_importance, 3]
+        pts = (rays_o[..., None, :] +
+               rays_d[..., None, :] * z_vals[..., :, None]
+               )  # [N_rays, N_samples + N_importance, 3]
 
         run_fn = network_fn if network_fine is None else network_fine
         #         raw = run_network(pts, fn=run_fn)
         raw = network_query_fn(pts, viewdirs, run_fn)
 
         rgb_map, disp_map, acc_map, weights, depth_map = raw2outputs(
-            raw, z_vals, rays_d, raw_noise_std, white_bkgd, pytest=pytest
-        )
+            raw, z_vals, rays_d, raw_noise_std, white_bkgd, pytest=pytest)
 
     ret = {"rgb_map": rgb_map, "disp_map": disp_map, "acc_map": acc_map}
     if retraw:
@@ -137,17 +140,19 @@ def render_rays(
         ret["z_std"] = torch.std(z_samples, dim=-1, unbiased=False)  # [N_rays]
 
     for k in ret:
-        if (
-            torch.isnan(ret[k]).any() or torch.isinf(ret[k]).any()
-        ) and DEBUG:  # TODO. logging
+        if (torch.isnan(ret[k]).any()
+                or torch.isinf(ret[k]).any()) and DEBUG:  # TODO. logging
             print(f"! [Numerical Error] {k} contains nan or inf.")
 
     return ret
 
 
-def render_path(
-    render_poses, hwf, chunk, render_kwargs, savedir=None, render_factor=0
-):  # to optimize. to much gpu memory now
+def render_path(render_poses,
+                hwf,
+                chunk,
+                render_kwargs,
+                savedir=None,
+                render_factor=0):  # to optimize. to much gpu memory now
     H, W, focal = hwf
 
     if render_factor != 0:
@@ -162,14 +167,16 @@ def render_path(
     t = time.time()
     with torch.no_grad():
         for i, c2w in enumerate(tqdm(render_poses)):
-            rgb, disp, acc, _ = render(
-                H, W, focal, chunk=chunk, c2w=c2w[:3, :4], **render_kwargs
-            )
+            rgb, disp, acc, _ = render(H,
+                                       W,
+                                       focal,
+                                       chunk=chunk,
+                                       c2w=c2w[:3, :4],
+                                       **render_kwargs)
             rgbs.append(rgb)
             disps.append(disp)
             if i == 0:
                 print(rgb.shape, disp.shape)
-
             """
             if gt_imgs is not None and render_factor==0:
                 p = -10. * np.log10(np.mean(np.square(rgb.cpu().numpy() - gt_imgs[i])))
@@ -187,7 +194,12 @@ def render_path(
     return rgbs, disps
 
 
-def raw2outputs(raw, z_vals, rays_d, raw_noise_std=0, white_bkgd=False, pytest=False):
+def raw2outputs(raw,
+                z_vals,
+                rays_d,
+                raw_noise_std=0,
+                white_bkgd=False,
+                pytest=False):
     """Transforms model's predictions to semantically meaningful values.
     Args:
         raw: [num_rays, num_samples along ray, 4]. Prediction from model.
@@ -200,12 +212,13 @@ def raw2outputs(raw, z_vals, rays_d, raw_noise_std=0, white_bkgd=False, pytest=F
         weights: [num_rays, num_samples]. Weights assigned to each sampled color.
         depth_map: [num_rays]. Estimated distance to object.
     """
-    raw2alpha = lambda raw, dists, act_fn=F.relu: 1.0 - torch.exp(-act_fn(raw) * dists)
+    raw2alpha = lambda raw, dists, act_fn=F.relu: 1.0 - torch.exp(-act_fn(raw)
+                                                                  * dists)
 
     dists = z_vals[..., 1:] - z_vals[..., :-1]
     dists = torch.cat(
-        [dists, torch.Tensor([1e10]).expand(dists[..., :1].shape)], -1
-    )  # [N_rays, N_samples]
+        [dists, torch.Tensor([1e10]).expand(dists[..., :1].shape)],
+        -1)  # [N_rays, N_samples]
 
     dists = dists * torch.norm(rays_d[..., None, :], dim=-1)
 
@@ -222,18 +235,14 @@ def raw2outputs(raw, z_vals, rays_d, raw_noise_std=0, white_bkgd=False, pytest=F
 
     alpha = raw2alpha(raw[..., 3] + noise, dists)  # [N_rays, N_samples]
     # weights = alpha * tf.math.cumprod(1.-alpha + 1e-10, -1, exclusive=True)
-    weights = (
-        alpha
-        * torch.cumprod(
-            torch.cat([torch.ones((alpha.shape[0], 1)), 1.0 - alpha + 1e-10], -1), -1
-        )[:, :-1]
-    )
+    weights = (alpha * torch.cumprod(
+        torch.cat([torch.ones(
+            (alpha.shape[0], 1)), 1.0 - alpha + 1e-10], -1), -1)[:, :-1])
     rgb_map = torch.sum(weights[..., None] * rgb, -2)  # [N_rays, 3]
 
     depth_map = torch.sum(weights * z_vals, -1)
-    disp_map = 1.0 / torch.max(
-        1e-10 * torch.ones_like(depth_map), depth_map / torch.sum(weights, -1)
-    )
+    disp_map = 1.0 / torch.max(1e-10 * torch.ones_like(depth_map),
+                               depth_map / torch.sum(weights, -1))
     acc_map = torch.sum(weights, -1)
 
     if white_bkgd:
@@ -306,8 +315,7 @@ def render(
     rays_d = torch.reshape(rays_d, [-1, 3]).float()
 
     near, far = near * torch.ones_like(rays_d[..., :1]), far * torch.ones_like(
-        rays_d[..., :1]
-    )
+        rays_d[..., :1])
     rays = torch.cat([rays_o, rays_d, near, far], -1)
     if use_viewdirs:
         rays = torch.cat([rays, viewdirs], -1)
@@ -328,7 +336,7 @@ def batchify_rays(rays_flat, chunk=1024 * 32, **kwargs):
     """Render rays in smaller minibatches to avoid OOM."""
     all_ret = {}
     for i in range(0, rays_flat.shape[0], chunk):  # 128*11
-        ret = render_rays(rays_flat[i : i + chunk], **kwargs)
+        ret = render_rays(rays_flat[i:i + chunk], **kwargs)
         for k in ret:
             if k not in all_ret:
                 all_ret[k] = []
@@ -347,24 +355,20 @@ def extract_mesh(render_kwargs, mesh_grid_size=80, threshold=50):
 
     with torch.no_grad():
         points = np.linspace(-1, 1, mesh_grid_size)
-        query_pts = (
-            torch.tensor(
-                np.stack(np.meshgrid(points, points, points), -1).astype(np.float32)
-            )
-            .reshape(-1, 1, 3)
-            .to(device)
-        )
+        query_pts = (torch.tensor(
+            np.stack(np.meshgrid(points, points, points),
+                     -1).astype(np.float32)).reshape(-1, 1, 3).to(device))
         viewdirs = torch.zeros(query_pts.shape[0], 3).to(device)
 
         output = network_query_fn(query_pts, viewdirs, network)  # TODO
 
-        grid = output[..., -1].reshape(mesh_grid_size, mesh_grid_size, mesh_grid_size)
+        grid = output[..., -1].reshape(mesh_grid_size, mesh_grid_size,
+                                       mesh_grid_size)
 
         print("fraction occupied:", (grid > threshold).float().mean())
 
         vertices, triangles = mcubes.marching_cubes(
-            grid.detach().cpu().numpy(), threshold
-        )
+            grid.detach().cpu().numpy(), threshold)
         mesh = trimesh.Trimesh(vertices, triangles)
 
     return mesh
