@@ -38,10 +38,10 @@ def main():
 
     # Load data
     (images, poses, render_poses, hwf, i_train, i_val, i_test,
-     incremental_flags, near, far, c, data, img_Tensor, i_fixed, i_fixed_test,
-     decoder_dataloader, meta_data) = create_dataset(args)
+    near, far, c, data, img_Tensor, i_fixed, i_fixed_test,
+     meta_data) = create_dataset(args)
     (train_imgs, test_imgs, train_poses, test_poses,
-     incremental_dataset) = meta_data['meta_data']
+     incremental_dataset) = meta_data
 
     # Cast intrinsics to right types
     H, W, focal = hwf
@@ -166,8 +166,10 @@ def main():
         stage_exp_dir = project(args, exp_basedir=exp_basedir, stage=stage)
         incremental_flags, rays_rgb = incremental_dataset.incremental_update_data(
             stage_exp_dir,
-            train_imgs, train_poses,
-            incremental_flags,)
+            train_imgs,
+            train_poses,
+            incremental_flags,
+        )
 
         for i in trange(start, args.cotraining_epoch):
 
@@ -175,7 +177,7 @@ def main():
             if use_batching:  # by default
                 # Random over all images
                 batch = rays_rgb[i_batch:i_batch + N_rand]  # [B, 2+1, 3*?]
-                batch = torch.transpose(batch, 0, 1)
+                batch = torch.transpose(batch, 0, 1) # [2+1, B, 3]
                 batch_incremental_flag = incremental_flags[i_batch:i_batch +
                                                            N_rand]
                 batch_rays, target_s = batch[:2], batch[2]
@@ -188,45 +190,6 @@ def main():
                     incremental_flags = incremental_flags[rand_idx]
 
                     i_batch = 0
-
-            else:
-                # Random from one image
-                img_i = np.random.choice(i_train)
-                target = images[img_i]  # 138*400*40*3
-                pose = poses[img_i, :3, :4]  # c2w matrices
-
-                if N_rand is not None:  # 1024
-                    rays_o, rays_d = get_rays(H, W, focal, torch.Tensor(pose),
-                                              c)  # (H, W, 3), (H, W, 3)
-
-                    if i < args.precrop_iters:  # 500
-                        coords_ij = coord_cartesian["precrop"]
-                        if i == start:
-                            print(
-                                f"[Config] Center cropping is enabled until iter {args.precrop_iters}"
-                            )
-                    else:
-                        coords_ij = coord_cartesian["regular"]
-
-                    select_inds = np.random.choice(
-                        coords_ij.shape[0],
-                        size=[N_rand],
-                        replace=False,  # select 1024 by default
-                    )  # (N_rand,)
-                    select_coords = coords_ij[select_inds].long(
-                    )  # (N_rand, 2) 1024*2 by default
-
-                    rays_o = rays_o[
-                        select_coords[:, 0],
-                        select_coords[:,
-                                      1]]  # (N_rand, 3). #* the same for all dirs beloning to the same image
-                    rays_d = rays_d[select_coords[:, 0],
-                                    select_coords[:, 1]]  # (N_rand, 3)
-                    batch_rays = torch.stack([rays_o, rays_d], 0)
-                    target_s = target[
-                        select_coords[:, 0],
-                        select_coords[:,
-                                      1]]  # (N_rand, 3) #* color of pixels in original image
 
             #####  Core optimization loop  #####
             rgb, disp, acc, extras = render(

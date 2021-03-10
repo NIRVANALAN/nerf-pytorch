@@ -45,7 +45,7 @@ def main():
 
     (images, poses, render_poses, hwf, i_train, i_val, i_test,
      incremental_flags, near, far, c, data, img_Tensor, i_fixed, i_fixed_test,
-     decoder_dataloader
+     decoder_dataloader, _
      # decoder_imgs,
      # decoder_imgs_normalized,
      ) = create_dataset(args)
@@ -369,10 +369,10 @@ def main():
                 psnr,
             )
             # TODO
-            psnr_baseline = np.load(
-                'logs/PIXNERF/9views_viewdirs_raw__id0_instance_1_srn_car_traintest_resnet_6_0_viewasinput/test_psnr_epoch_010001.npy'
-            )
-            plt.plot(list(range(psnr_baseline.shape[0])), psnr_baseline)[0]
+            # psnr_baseline = np.load(
+            #     'logs/PIXNERF/9views_viewdirs_raw__id0_instance_1_srn_car_traintest_resnet_6_0_viewasinput/test_psnr_epoch_010001.npy'
+            # )
+            # plt.plot(list(range(psnr_baseline.shape[0])), psnr_baseline)[0]
             plt.plot(list(range(psnr.shape[0])), psnr)[0]
             plt.savefig(os.path.join(psnr_savedir, f"iter_{i}.png"))
             plt.clf()
