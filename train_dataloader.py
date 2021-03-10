@@ -112,67 +112,41 @@ def main():
     # Move testing data to GPU
     render_poses = todevice(render_poses)
 
-    # Short circuit if only rendering out from trained model
-    if args.render_only:
-        print("RENDER ONLY")
-        with torch.no_grad():
-            if args.render_test:
-                # render_test switches to test poses
-                images = images[i_test]
-            else:
-                # Default is smoother render_poses path
-                images = None
-
-            testsavedir = os.path.join(
-                basedir,
-                expname,
-                "renderonly_{}_{:06d}".format(
-                    "test" if args.render_test else "path", start),
-            )
-            os.makedirs(testsavedir, exist_ok=True)
-            print("test poses shape", render_poses.shape)
-
-            rgbs, _ = render_path(
-                render_poses,
-                hwf,
-                args.chunk,
-                render_kwargs_test,
-                gt_imgs=images,
-                savedir=testsavedir,
-                render_factor=args.render_factor,
-            )
-            print("Done rendering", testsavedir)
-            imageio.mimwrite(os.path.join(testsavedir, "video.mp4"),
-                             to8b(rgbs),
-                             fps=30,
-                             quality=8)
-
-            return
-
-    # Short circuit if only extracting mesh from trained model
-    if args.mesh_only:
-        mesh = extract_mesh(render_kwargs_test,
-                            mesh_grid_size=args.mesh_grid_size,
-                            threshold=50)
-
-        testsavedir = os.path.join(
-            basedir,
-            expname,
-            "renderonly_{}_{:06d}".format(
-                "test" if args.render_test else "path", start),
-        )
-        os.makedirs(testsavedir, exist_ok=True)
-        path = os.path.join(testsavedir, "mesh.obj")
-
-        print("saving mesh to ", path)
-
-        mesh.export(path)
-
-        return
-
     # Prepare raybatch tensor if batching random rays
     N_rand = args.N_rand
     use_batching = not args.no_batching
+
+    if use_batching:
+        # For random ray batching
+        # print("get rays")
+        rays = torch.stack(  # TODO
+            [get_rays(H, W, focal, p, c) for p in poses[:, :3, :4]],
+            0)  # [N, ro+rd, H, W, 3] #?
+
+        rays_rgb = torch.cat([rays, images[:, None]],
+                             1)  # [N, ro+rd+rgb, H, W, 3]
+        rays_rgb = rays_rgb.permute(0, 2, 3, 1, 4)  # [N, H, W, ro+rd+rgb, 3]
+        rays_rgb = torch.stack([rays_rgb[i] for i in i_train],
+                               0)  # train images only
+        # incremental_flags_indices = torch.nonzero(
+        #     incremental_flags).squeeze()  # get nonzero indices
+        # incremental_flags = torch.zeros(rays_rgb.shape[:-1]).long()
+        # incremental_flags[incremental_flags_indices,
+        #                   ...] = 1  # bool mask matrix
+
+        # rays_rgb = rays_rgb.view(-1, 3, 3)
+        # incremental_flags = incremental_flags.view(-1, 3)
+        rays_rgb = torch.reshape(rays_rgb,
+                                 [-1, 3, 3])  # [(N-1)*H*W, ro+rd+rgb, 3]
+
+        # shuffle along the first axis
+        perm_randidx = torch.randperm(rays_rgb.size(0))
+        rays_rgb = rays_rgb[perm_randidx]
+        # incremental_flags = incremental_flags[perm_randidx]
+
+        rays_rgb = todevice(rays_rgb)
+        # incremental_flags = todevice(incremental_flags)
+        i_batch = 0
 
     # print("Begin")
     # print("TRAIN views are {}".format(i_train))
@@ -214,8 +188,9 @@ def main():
             # Random over all images
             batch = next(iter(train_dataloader))
 
-            batch_rays, target_s, flag = map(todevice, batch)
-            batch_rays = torch.transpose(batch_rays, 0, 1)  # 2 * BS * 3
+            batch, _ = map(todevice, batch)
+            batch = torch.transpose(batch, 0, 1)  # 2 * BS * 3
+            batch_rays, target_s = batch[:2], batch[2]
 
             # import ipdb
             # ipdb.set_trace()

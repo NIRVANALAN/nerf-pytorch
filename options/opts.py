@@ -479,6 +479,14 @@ def config_parser():
         type=str,
         default=None,
         help="where to inversion output, comes from train_test by default")
+
+    parser.add_argument(
+        "--test_interv",
+        type=int,
+        default=1,
+        help="render poses interval",
+    )
+
     return parser
 
 
@@ -582,7 +590,7 @@ def add_proj_parser(parser):
                         help="sample range")
     parser.add_argument("--sampling_numbers",
                         type=int,
-                        default=5,
+                        default=10,
                         help="sample numbers")
     parser.add_argument("--sampling_strategy",
                         type=str,

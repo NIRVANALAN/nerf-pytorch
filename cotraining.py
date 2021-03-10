@@ -21,7 +21,7 @@ from models import *
 from options.opts import add_proj_parser, config_parser, prepare_proj_parser
 from stylegan2.projector import project
 from util import *
-from torch.utils.data import DataLoader,
+from torch.utils.data import DataLoader
 
 torch.set_default_tensor_type("torch.cuda.FloatTensor")
 
@@ -68,7 +68,7 @@ def main():
     # copy train_imgs for first projection
     train_img_dir = exp_basedir / 'train_img'
     train_img_dir.mkdir(exist_ok=True)
-    for i in train_imgs.shape[0]:
+    for i in range(train_imgs.shape[0]):
         img = train_imgs[i].cpu().numpy()
         imageio.imwrite(train_img_dir / f'{i:06}.png', img)
 
@@ -122,34 +122,31 @@ def main():
     train_imgs, train_poses, test_imgs, test_poses = list(
         map(todevice, [train_imgs, train_poses, test_imgs, test_poses]))
 
-    # if use_batching:
-    #     # For random ray batching
-    #     # print("get rays")
-    #     rays = torch.stack(  # TODO
-    #         [get_rays(H, W, focal, p, c) for p in train_poses[:, :3, :4]],
-    #         0)  # [N, ro+rd, H, W, 3] #?
+    if use_batching:
+        #     # For random ray batching
+        #     # print("get rays")
+        rays = torch.stack(  # TODO
+            [get_rays(H, W, focal, p, c) for p in train_poses[:, :3, :4]],
+            0)  # [N, ro+rd, H, W, 3] #?
 
-    #     rays_rgb = torch.cat([rays, train_imgs[:, None]],
-    #                          1)  # [N, ro+rd+rgb, H, W, 3]
+        rays_rgb = torch.cat([rays, train_imgs[:, None]],
+                             1)  # [N, ro+rd+rgb, H, W, 3]
 
-    #     rays_rgb = rays_rgb.permute(0, 2, 3, 1, 4)  # [N, H, W, ro+rd+rgb, 3]
-    #     # rays_rgb = torch.stack([rays_rgb[i] for i in i_train],
-    #     #                        0)  # train images only
-    #     incremental_flags_indices = torch.nonzero(
-    #         incremental_flags).squeeze()  # get nonzero indices
-    #     incremental_flags = torch.zeros(rays_rgb.shape[:-1]).long()
-    #     incremental_flags[incremental_flags_indices,
-    #                       ...] = 1  # bool mask matrix
+        rays_rgb = rays_rgb.permute(0, 2, 3, 1, 4)  # [N, H, W, ro+rd+rgb, 3]
+        # rays_rgb = torch.stack([rays_rgb[i] for i in i_train],
+        #                        0)  # train images only
 
-    #     rays_rgb = rays_rgb.view(-1, 3, 3)
-    #     # rays_rgb = torch.reshape(rays_rgb, [-1, 3, 3])  # [(N-1)*H*W, ro+rd+rgb, 3]
+        # rays_rgb = rays_rgb.view(-1, 3, 3)
+        rays_rgb = torch.reshape(rays_rgb,
+                                 [-1, 3, 3])  # [(N-1)*H*W, ro+rd+rgb, 3]
+        incremental_flags = torch.zeros(rays_rgb.shape[:-1]).long()
 
-    #     # shuffle
-    #     perm_randidx = torch.randperm(rays_rgb.size(0))
-    #     rays_rgb = rays_rgb[perm_randidx]
-    #     incremental_flags = incremental_flags[perm_randidx]
-    #     # print("done")
-    #     i_batch = 0
+        # shuffle
+        perm_randidx = torch.randperm(rays_rgb.size(0))
+        rays_rgb = rays_rgb[perm_randidx]
+        incremental_flags = incremental_flags[perm_randidx]
+
+        i_batch = 0
 
     print("TEST views number: {}".format(test_imgs.shape[0]))
     psnr_savedir = os.path.join(basedir, expname, 'psnr')
@@ -159,27 +156,35 @@ def main():
     if start != args.epoch - 1:  # ease of use in test
         start += 1
 
-    for stage in range(0, args.cotraining_stage):
-        print('stage: {}'.format(stage))
+    # inversion
+    stage_exp_dir = project(args, exp_basedir=exp_basedir, stage=0)
 
-        # inversion
-        stage_exp_dir = project(args, exp_basedir=exp_basedir, stage=stage)
-        incremental_flags, rays_rgb = incremental_dataset.incremental_update_data(
-            stage_exp_dir,
-            train_imgs,
-            train_poses,
-            incremental_flags,
-        )
+    # init dataloader
+    train_dataloader = DataLoader(incremental_dataset,
+                                  batch_size=N_rand,
+                                  shuffle=True,
+                                  num_workers=0,
+                                  drop_last=True)
+
+    for stage in range(1, args.cotraining_stage):
+        print('stage: {}'.format(stage))
 
         for i in trange(start, args.cotraining_epoch):
 
             # Sample random ray batch
             if use_batching:  # by default
                 # Random over all images
+                batch = next(iter(train_dataloader))
+
+                batch, _ = map(todevice, batch)
+                batch = torch.transpose(batch, 0, 1)  # 2 * BS * 3
+                batch_rays, target_s = batch[:2], batch[2]
+                '''
+                # Random over all images
                 batch = rays_rgb[i_batch:i_batch + N_rand]  # [B, 2+1, 3*?]
                 batch = torch.transpose(batch, 0, 1)  # [2+1, B, 3]
-                batch_incremental_flag = incremental_flags[i_batch:i_batch +
-                                                           N_rand]
+                # batch_incremental_flag = incremental_flags[i_batch:i_batch +
+                #                                            N_rand]
                 batch_rays, target_s = batch[:2], batch[2]
 
                 i_batch += N_rand
@@ -190,6 +195,7 @@ def main():
                     incremental_flags = incremental_flags[rand_idx]
 
                     i_batch = 0
+                '''
 
             #####  Core optimization loop  #####
             rgb, disp, acc, extras = render(
@@ -206,9 +212,10 @@ def main():
             optimizer.zero_grad()
 
             if args.incremental_path != None:
-                img_loss = img2mse(rgb, target_s, keepdim=True)
-                img_loss = (img_loss * batch_incremental_flag).mean() + (
-                    img_loss * (1 - batch_incremental_flag)).mean() * args.w_gt
+                pass
+                # img_loss = img2mse(rgb, target_s, keepdim=True)
+                # img_loss = (img_loss * batch_incremental_flag).mean() + (
+                #     img_loss * (1 - batch_incremental_flag)).mean() * args.w_gt
             else:
                 img_loss = img2mse(rgb, target_s)
 
@@ -241,83 +248,95 @@ def main():
             global_step += 1
 
         #### TEST ####
-        if i > 1 and (i != start and
-                      (i % args.i_testset == 0 or i + 1 == args.epoch)):
-            testsavedir = os.path.join(basedir, expname,
-                                       "testset_{:06d}".format(i))
-            os.makedirs(testsavedir, exist_ok=True)
-            print("test poses shape", test_poses.shape)
-            # encode on test_set
+        testsavedir = os.path.join(basedir, expname,
+                                   "testset_{:02d}".format(stage))
+        os.makedirs(testsavedir, exist_ok=True)
+        print("test poses shape", test_poses.shape)
+        # encode on test_set
 
-            rgbs, disps = render_path(
-                test_poses,
-                hwf,
-                args.chunk,
-                render_kwargs_test,
-                savedir=testsavedir,
-            )
+        rgbs, disps = render_path(
+            test_poses[::args.test_interv],
+            hwf,
+            args.chunk,
+            render_kwargs_test,
+            savedir=testsavedir,
+        )
 
-            img_loss = img2mse(rgbs, test_imgs, keepdims=True)
-            psnr = mse2psnr(img_loss).cpu().numpy()
-            np.save(
-                os.path.join(basedir, expname,
-                             "test_psnr_epoch_{:06d}".format(i)),
-                psnr,
-            )
-            # TODO
-            # psnr_baseline = np.load(
-            #     'logs/PIXNERF/9views_viewdirs_raw__id0_instance_1_srn_car_traintest_resnet_6_0_viewasinput/test_psnr_epoch_010001.npy'
-            # )
-            # plt.plot(list(range(psnr_baseline.shape[0])), psnr_baseline)[0]
-            plt.plot(list(range(psnr.shape[0])), psnr)[0]
-            plt.savefig(os.path.join(psnr_savedir, f"iter_{i}.png"))
-            plt.clf()
+        img_loss = img2mse(rgbs, test_imgs[::args.test_interv], keepdims=True)
+        psnr = mse2psnr(img_loss).cpu().numpy()
+        np.save(
+            os.path.join(basedir, expname,
+                         "test_psnr_stage_{:02d}".format(stage)),
+            psnr,
+        )
+        # TODO
+        # psnr_baseline = np.load(
+        #     'logs/PIXNERF/9views_viewdirs_raw__id0_instance_1_srn_car_traintest_resnet_6_0_viewasinput/test_psnr_epoch_010001.npy'
+        # )
+        # plt.plot(list(range(psnr_baseline.shape[0])), psnr_baseline)[0]
+        plt.plot(list(range(psnr.shape[0])), psnr)[0]
+        plt.savefig(os.path.join(psnr_savedir, f"iter_{i}.png"))
+        plt.clf()
 
-            log = f"[TEST] Iter: {i} Loss: {img_loss.mean().item()}  PSNR: {psnr.mean()}\n"
-            print(log)
+        log = f"[TEST] Iter: {i} Loss: {img_loss.mean().item()}  PSNR: {psnr.mean()}\n"
+        print(log)
 
-            writer.add_scalar("Loss/Test", img_loss.mean().item(), i)
-            writer.add_scalar("PSNR/Test", psnr.mean().item(), i)
-            writer.add_images("test_images", rgbs[:5].permute(0, 3, 1, 2), i)
+        writer.add_scalar("Loss/Test", img_loss.mean().item(), i)
+        writer.add_scalar("PSNR/Test", psnr.mean().item(), i)
+        writer.add_images("test_images", rgbs[:5].permute(0, 3, 1, 2), i)
 
-            # save also to log file
+        # save also to log file
 
-            f = os.path.join(basedir, expname, "log.txt")
-            with open(f, "w+") as file:
-                file.write(log)
-
-            rgbs, disps = map(lambda x: x.cpu().numpy(), (rgbs, disps))
-            print("Done, saving", rgbs.shape, disps.shape)
-            moviebase = exp_basedir / "{}_spiral_{:06d}_".format(expname, i)
-            imageio.mimwrite(moviebase + "rgb.mp4",
-                             to8b(rgbs),
-                             fps=10,
-                             quality=8)
-
+        f = os.path.join(basedir, expname, "log.txt")
+        with open(f, "w+") as file:
+            file.write(log)
         # save ckpt
-        if i > 1 and (i % args.i_weights == 0 or i + 1 == args.epoch):
-            path = os.path.join(basedir, expname, "{:06d}.tar".format(i))
-            torch.save(
-                {
-                    "global_step":
-                    global_step,
-                    "network_fn_state_dict":
-                    render_kwargs_train["network_fn"].state_dict(),
-                    "network_fine_state_dict":
-                    render_kwargs_train["network_fine"].state_dict(),
-                    "optimizer_state_dict":
-                    optimizer.state_dict(),
-                },
-                path,
-            )
-            print("Saved checkpoints at", path)
+        path = os.path.join(basedir, expname, "stage_{:02d}.tar".format(stage))
+        torch.save(
+            {
+                "global_step":
+                global_step,
+                "network_fn_state_dict":
+                render_kwargs_train["network_fn"].state_dict(),
+                "network_fine_state_dict":
+                render_kwargs_train["network_fine"].state_dict(),
+                "optimizer_state_dict":
+                optimizer.state_dict(),
+            },
+            path,
+        )
+        print("Saved checkpoints at", path)
 
-            if i + 1 == args.epoch:
-                break
+        # save video
+        rgbs, disps = map(lambda x: x.cpu().numpy(), (rgbs, disps))
+        print("Done, saving", rgbs.shape, disps.shape)
+        moviebase = exp_basedir / "spiral_{:06d}_".format(i)
+        imageio.mimwrite(str(moviebase) + "rgb.mp4",
+                         to8b(rgbs),
+                         fps=10,
+                         quality=8)
+
+        # inversion and rebuild
+        stage_exp_dir = project(args, exp_basedir=exp_basedir, stage=stage)
+
+        # add incremental samples
+        incremental_rays_rgb = incremental_dataset.incremental_update_data(
+            stage_exp_dir)
+        rays_rgb = torch.cat([rays_rgb, incremental_rays_rgb])
+
+        # rebuild dataset
+        train_dataloader = DataLoader(incremental_dataset,
+                                      batch_size=N_rand,
+                                      shuffle=True,
+                                      num_workers=0,
+                                      drop_last=True)
+
+        # shuffle
+        perm_randidx = torch.randperm(rays_rgb.size(0))
+        rays_rgb = rays_rgb[perm_randidx]
 
     writer.close()
 
 
 if __name__ == "__main__":
-    torch.set_default_tensor_type("torch.cuda.FloatTensor")
     main()

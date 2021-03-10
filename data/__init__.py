@@ -36,8 +36,11 @@ class Incremental_dataset(Dataset):
         self.poses = train_poses.to(device)
         self.h, self.w, self.focal, self.c = intrinsics
         self.rays_rgb = self.build_rays_rgb(self.imgs, self.poses)
+        self.runtime_rays_rgb = self.rays_rgb.clone(
+        )  # update this attribute during training
         self.flags = torch.zeros(self.rays_rgb.shape[:-1]).cpu().long(
         )  # 0 denotes from original NeRF dataset
+        self.device = device
         # import ipdb
         # ipdb.set_trace()
 
@@ -56,7 +59,7 @@ class Incremental_dataset(Dataset):
         # rays_rgb = rays_rgb.view(-1, 3, 3) # [NHW, ro+rd+rgb, 3]
         rays_rgb = torch.reshape(rays_rgb, (-1, 3, 3))  # [NHW, ro+rd+rgb, 3]
         if shuffle_init:
-            rays_rgb = rays_rgb[torch.randperm(rays_rgb.size(0))]
+            rays_rgb = self.force_shuffle(rays_rgb)
 
         return rays_rgb
 
@@ -64,21 +67,27 @@ class Incremental_dataset(Dataset):
         return self.rays_rgb.shape[0]
 
     def __getitem__(self, idx):
-        sample = self.rays_rgb[idx]  # [2+1, 3*?]
+        sample = self.runtime_rays_rgb[idx]  # [2+1, 3*?]
         flag = self.flags[idx]
         return sample, flag
         # rays, target = sample[:2], sample[2]
         # return rays, target, flag
 
+    @staticmethod
+    def force_shuffle(rays_rgb, return_idx=False):
+
+        rand_idx = torch.randperm(rays_rgb.shape[0])
+        rays_rgb = rays_rgb[rand_idx]
+        if return_idx:
+            return rays_rgb, rand_idx
+        return rays_rgb
     # dynamically update data, add data(img, pose) from inversion
-    def incremental_update_data(
-        self,
-        incremental_path,
-    ):
+    def incremental_update_data(self, incremental_path, update_runtime=True):
         # search for incremental data to be added
-        incremental_imgs_path = sorted(glob.glob(incremental_path + '/*.png'))
+        incremental_imgs_path = sorted(
+            glob.glob(str(incremental_path / '*.png')))
         incremental_ids = np.array([
-            int(rgb_path.split('/')[-1].split('_')[0])
+            int(rgb_path.split('/')[-1].split('.')[0])
             for rgb_path in incremental_imgs_path
         ])
         if self.verbose:
@@ -87,11 +96,16 @@ class Incremental_dataset(Dataset):
         incremental_imgs = torch.stack([
             torch.from_numpy(imageio.imread(rgb_path)[..., :3] / 255)
             for rgb_path in incremental_imgs_path
-        ])
-        incremental_poses = self.test_instance["poses"][incremental_ids, ...],
+        ]).to(self.device)
+        incremental_poses = self.test_instance["poses"][incremental_ids,
+                                                        ...].to(self.device)
 
         incremental_rays_rgb = self.build_rays_rgb(incremental_imgs,
                                                    incremental_poses)
+        if update_runtime:
+            self.runtime_rays_rgb = torch.cat(
+                [self.runtime_rays_rgb, incremental_rays_rgb])
+
         return incremental_rays_rgb
 
         # needs ablation study
