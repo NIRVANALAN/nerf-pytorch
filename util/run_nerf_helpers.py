@@ -7,17 +7,17 @@ import torch.nn.functional as F
 import numpy as np
 
 
-# Misc
+def img2mse(x, y, keepdim=False, test=False):
+    if test:
+        return torch.mean((x - y)**2, dim=(-3, -2, -1))
+    if keepdim:
+        return F.mse_loss(x, y, reduction='none')
+    else:
+        return torch.mean((x - y)**2)
 
 
-img2mse = (
-    lambda x, y, keepdims=False: torch.mean((x - y) ** 2, dim=(-3, -2, -1))
-    if keepdims
-    else torch.mean((x - y) ** 2)
-)
 mse2psnr = (
-    lambda x: -10.0
-    * torch.log10(torch.clip(x, 0, 1))
+    lambda x: -10.0 * torch.log10(torch.clip(x, 0, 1))
     # / torch.log(torch.Tensor([10.0]))
 )  # * ln(x) / ln(y) = log_y^x
 
@@ -40,7 +40,6 @@ class Embedder:  # !
         "periodic_fns": [torch.sin, torch.cos],
     }
     """
-
     def __init__(self, **kwargs):
         self.kwargs = kwargs
         self.create_embedding_fn()
@@ -57,13 +56,14 @@ class Embedder:  # !
         N_freqs = self.kwargs["num_freqs"]
 
         if self.kwargs["log_sampling"]:
-            freq_bands = 2.0 ** torch.linspace(0.0, max_freq, steps=N_freqs)
+            freq_bands = 2.0**torch.linspace(0.0, max_freq, steps=N_freqs)
         else:
-            freq_bands = torch.linspace(2.0 ** 0.0, 2.0 ** max_freq, steps=N_freqs)
+            freq_bands = torch.linspace(2.0**0.0, 2.0**max_freq, steps=N_freqs)
 
         for freq in freq_bands:
             for p_fn in self.kwargs["periodic_fns"]:
-                embed_fns.append(lambda x, p_fn=p_fn, freq=freq: p_fn(x * freq))
+                embed_fns.append(
+                    lambda x, p_fn=p_fn, freq=freq: p_fn(x * freq))
                 out_dim += d
 
         self.embed_fns = embed_fns
@@ -104,7 +104,8 @@ def cartesian_coord(H, W, precrop_frac=None, reshape=False):
         )
     else:
         coords_ij = torch.stack(
-            torch.meshgrid(torch.linspace(0, H - 1, H), torch.linspace(0, W - 1, W)),
+            torch.meshgrid(torch.linspace(0, H - 1, H),
+                           torch.linspace(0, W - 1, W)),
             -1,
         )  # stack in 'ij' indexing order. -> (H, W, 2)
 
@@ -151,7 +152,8 @@ def unproj_map(width, height, f, c=None):
 
     Z = torch.ones_like(X)
     unproj = torch.stack((X, -Y, -Z), dim=-1)
-    unproj /= torch.norm(unproj, dim=-1).unsqueeze(-1)  # * normalized unit direction
+    unproj /= torch.norm(unproj,
+                         dim=-1).unsqueeze(-1)  # * normalized unit direction
 
     return unproj
 
@@ -179,16 +181,15 @@ def get_rays(H, W, focal, c2w, c=None):
 
 
 def get_rays_np(H, W, focal, c2w):  # TODO
-    i, j = np.meshgrid(
-        np.arange(W, dtype=np.float32), np.arange(H, dtype=np.float32), indexing="xy"
-    )
+    i, j = np.meshgrid(np.arange(W, dtype=np.float32),
+                       np.arange(H, dtype=np.float32),
+                       indexing="xy")
     dirs = np.stack(
-        [(i - W * 0.5) / focal, -(j - H * 0.5) / focal, -np.ones_like(i)], -1
-    )
+        [(i - W * 0.5) / focal, -(j - H * 0.5) / focal, -np.ones_like(i)], -1)
     # Rotate ray directions from camera frame to the world frame
     rays_d = np.sum(
-        dirs[..., np.newaxis, :] * c2w[:3, :3], -1
-    )  # dot product, equals to: [c2w.dot(dir) for dir in dirs]
+        dirs[..., np.newaxis, :] * c2w[:3, :3],
+        -1)  # dot product, equals to: [c2w.dot(dir) for dir in dirs]
     # Translate camera frame's origin to the world frame. It is the origin of all rays.
     rays_o = np.broadcast_to(c2w[:3, -1], np.shape(rays_d))
     return rays_o, rays_d
@@ -204,16 +205,10 @@ def ndc_rays(H, W, focal, near, rays_o, rays_d):
     o1 = -1.0 / (H / (2.0 * focal)) * rays_o[..., 1] / rays_o[..., 2]
     o2 = 1.0 + 2.0 * near / rays_o[..., 2]
 
-    d0 = (
-        -1.0
-        / (W / (2.0 * focal))
-        * (rays_d[..., 0] / rays_d[..., 2] - rays_o[..., 0] / rays_o[..., 2])
-    )
-    d1 = (
-        -1.0
-        / (H / (2.0 * focal))
-        * (rays_d[..., 1] / rays_d[..., 2] - rays_o[..., 1] / rays_o[..., 2])
-    )
+    d0 = (-1.0 / (W / (2.0 * focal)) *
+          (rays_d[..., 0] / rays_d[..., 2] - rays_o[..., 0] / rays_o[..., 2]))
+    d1 = (-1.0 / (H / (2.0 * focal)) *
+          (rays_d[..., 1] / rays_d[..., 2] - rays_o[..., 1] / rays_o[..., 2]))
     d2 = -2.0 * near / rays_o[..., 2]
 
     rays_o = torch.stack([o0, o1, o2], -1)
@@ -228,7 +223,8 @@ def sample_pdf(bins, weights, N_samples, det=False, pytest=False):
     weights = weights + 1e-5  # prevent nans
     pdf = weights / torch.sum(weights, -1, keepdim=True)
     cdf = torch.cumsum(pdf, -1)
-    cdf = torch.cat([torch.zeros_like(cdf[..., :1]), cdf], -1)  # (batch, len(bins))
+    cdf = torch.cat([torch.zeros_like(cdf[..., :1]), cdf],
+                    -1)  # (batch, len(bins))
 
     # Take uniform samples
     if det:

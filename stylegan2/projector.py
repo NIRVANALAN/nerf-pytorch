@@ -6,6 +6,7 @@ from datetime import datetime
 from pathlib import Path
 
 import numpy as np
+import shutil
 import torch
 from PIL import Image
 from torch import optim
@@ -21,17 +22,19 @@ now = datetime.now()
 
 def load_nerf_psnr(
     psnr_path,
+    nerf_pred_path,
     sampling_range=50,
     sampling_strategy=None,
     sampling_numbers=5,
     verbose=True,
 ):
 
-    nerf_pred_path = Path(psnr_path).parent / ('testset_{}'.format(
-        psnr_path.name.split('.')[0].split('_')[-1]))
-
+    # nerf_pred_path = Path(psnr_path).parent.parent / ('testset_{}'.format(
+    #     psnr_path.name.split('_')[-1]))
+    
     # stage>1
-    if Path(psnr_path).exists():
+    if psnr_path != None:
+        assert psnr_path.exists()
         psnr = np.load(psnr_path)
 
         ids = np.argsort(psnr)
@@ -62,10 +65,13 @@ def load_nerf_psnr(
             Path(nerf_pred_path) / '{:03}.png'.format(idx)
             for idx in ids_to_proj
         ]
-    # first stage
+    # stage 0
     else:
+        if verbose:
+            print('projection on train_imgs')
+
         files_to_proj = glob.glob(
-            str(Path(nerf_pred_path).parent / 'train_img/*'))
+            str(Path(nerf_pred_path).parent / 'stage0/*'))
 
     return files_to_proj
 
@@ -111,9 +117,6 @@ def get_lr(t, initial_lr, rampdown=0.25, rampup=0.05):
 def latent_noise(latents: list, strength):
     latents_n = []
 
-    # import ipdb
-    # ipdb.set_trace()
-
     # only add noise to optim_vars
     for latent in latents:
         if latent.requires_grad:
@@ -136,12 +139,38 @@ def make_image(tensor):
 
 device = "cuda"
 
+#class Projector():
+#    def __init__():
+#        pass
 
-def project(args, exp_basedir, stage=1):
+
+def project(args, exp_basedir, stage=0):
+    '''
+    do inversion in stage_{n-1}, save in stage_{n}
+    '''
     n_mean_latent = 10000
 
     resize = min(args.size, 256)
-    args.step = 1000 if stage == 1 else 500
+
+    output_dir = Path(exp_basedir) / f'stage{stage}'
+
+    if stage==1 and args.stage0_path != None:
+        inversion_dir = Path(args.stage0_path)
+        # directly copy inversion results from stage1
+        if not output_dir.exists():
+            shutil.copytree(inversion_dir.parent / 'stage1', output_dir)
+    else:
+        inversion_dir = Path(exp_basedir) / f'stage{max(0, stage-1)}'
+
+
+    if stage == 0:
+        step = 1000
+        test_psnr_path = None
+        test_pred_path=inversion_dir
+    else:
+        step = args.step
+        test_psnr_path = inversion_dir/ f'test_psnr.npy'
+        test_pred_path = inversion_dir / 'testset'
 
     transform = transforms.Compose([
         transforms.Resize(resize),
@@ -152,14 +181,11 @@ def project(args, exp_basedir, stage=1):
 
     imgs = []
 
-    exp_basedir = Path(exp_basedir)
-    stage_expdir = exp_basedir / f'stage{stage}'
-    if not stage_expdir.exists():
-        stage_expdir.mkdir()
+    if not output_dir.exists():
+        output_dir.mkdir()
 
-    nerf_psnr_path = exp_basedir / f'test_psnr_epoch_{args.epoch*stage:06}.npy'
 
-    files = load_nerf_psnr(nerf_psnr_path, args.sampling_range,
+    files = load_nerf_psnr(test_psnr_path, test_pred_path, args.sampling_range,
                            args.sampling_strategy, args.sampling_numbers)
 
     for imgfile in files:
@@ -199,11 +225,20 @@ def project(args, exp_basedir, stage=1):
 
     # prepare for latent code(s)
     # shared id code + independent pose code
-    if stage > 1:
+    proj_latent_filepath = output_dir / 'proj_latent.pt'
+
+    if Path(proj_latent_filepath).exists():
+        return output_dir
+
+    if stage > 0:
         # id_aware by default
         #TODO
-        proj_latent_path = exp_basedir / 'stage1' / 'proj_latent.pt'
-        saved_result = torch.load(proj_latent_path)
+        if args.stage0_path != None:
+            proj_latent_stage0 = Path(args.stage0_path) / 'proj_latent.pt'
+        else:
+            proj_latent_stage0 = output_dir.parent / 'stage0' / 'proj_latent.pt'
+
+        saved_result = torch.load(proj_latent_stage0)
 
         img_keys = list(saved_result.keys())[:-1]
 
@@ -215,7 +250,7 @@ def project(args, exp_basedir, stage=1):
         # select Nearest code?
         latent_pose = torch.stack(latent_poses).mean(0).detach().clone()
         latent_pose = latent_pose.repeat(imgs.shape[0], 1)
-    else:
+    else: # original inversion
         latent_in = latent_mean.detach().clone().unsqueeze(0)
         latent_pose = latent_in.repeat(imgs.shape[0],
                                        1)  # independent pose code
@@ -234,7 +269,7 @@ def project(args, exp_basedir, stage=1):
     optimizer = optim.Adam(latents + noises, lr=args.lr)
 
     # core loop
-    pbar = tqdm(range(args.step))
+    pbar = tqdm(range(step))
     latent_path = []
     for i in pbar:
         t = i / args.step
@@ -286,7 +321,7 @@ def project(args, exp_basedir, stage=1):
         noise_normalize_(noises)
 
         # log
-        if (i + 1) % 100 == 0:
+        if (i + 1) % 10 == 0:
             latent_path.append(
                 [latent.detach().clone() for latent in latents_n])
         pbar.set_description((
@@ -313,7 +348,7 @@ def project(args, exp_basedir, stage=1):
     #     path_base.mkdir(parents=True)
 
     # save log
-    with open(stage_expdir / 'loss.log', 'w') as f:
+    with open(output_dir / 'loss.log', 'w') as f:
         f.write(
             f"perceptual: {p_loss.item():.4f};\n noise regularize: {n_loss.item():.4f};\n"
             f" mse: {l2_loss.item():.4f};\n  l1: {l1_loss.item():.4f}; lr: {lr:.4f}\n"
@@ -323,8 +358,7 @@ def project(args, exp_basedir, stage=1):
     result_file = {}
 
     for i, input_name in enumerate(files):
-        filename = '{}_{}imgs'.format(
-            os.path.splitext(os.path.basename(files[i]))[0])
+        filename = '{}'.format(os.path.splitext(os.path.basename(files[i]))[0])
         # args.inject_index,
         # len(files))
 
@@ -339,7 +373,7 @@ def project(args, exp_basedir, stage=1):
 
         result_file[input_name].update({"latent_pose": latent_pose[i]})
 
-        img_name = stage_expdir / '{}.png'.format(filename)
+        img_name = output_dir / '{}.png'.format(filename)
         pil_img = Image.fromarray(img_ar[i])
         pil_img.save(img_name)
 
@@ -347,5 +381,5 @@ def project(args, exp_basedir, stage=1):
         "latent_id": latent_id[0],
     })
 
-    torch.save(result_file, stage_expdir  / 'proj_latent.pt')
-    return stage_expdir
+    torch.save(result_file, proj_latent_filepath)
+    return output_dir

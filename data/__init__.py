@@ -1,5 +1,6 @@
 import glob
 import os
+from util.util import shuffle_Tensor
 import warnings
 from pathlib import Path
 
@@ -38,11 +39,10 @@ class Incremental_dataset(Dataset):
         self.rays_rgb = self.build_rays_rgb(self.imgs, self.poses)
         self.runtime_rays_rgb = self.rays_rgb.clone(
         )  # update this attribute during training
-        self.flags = torch.zeros(self.rays_rgb.shape[:-1]).cpu().long(
+        self.flags = torch.zeros(self.rays_rgb.shape[:-1]).long(
         )  # 0 denotes from original NeRF dataset
+        self.runtime_flags = self.flags.clone()
         self.device = device
-        # import ipdb
-        # ipdb.set_trace()
 
     # @ staticmethod
     def build_rays_rgb(self, imgs, poses, shuffle_init=True):
@@ -59,28 +59,31 @@ class Incremental_dataset(Dataset):
         # rays_rgb = rays_rgb.view(-1, 3, 3) # [NHW, ro+rd+rgb, 3]
         rays_rgb = torch.reshape(rays_rgb, (-1, 3, 3))  # [NHW, ro+rd+rgb, 3]
         if shuffle_init:
-            rays_rgb = self.force_shuffle(rays_rgb)
+            rays_rgb = self.force_shuffle(rays_rgb)[0]
 
-        return rays_rgb
+        return rays_rgb.float()
 
     def __len__(self):
-        return self.rays_rgb.shape[0]
+        return self.runtime_rays_rgb.shape[0]
 
     def __getitem__(self, idx):
         sample = self.runtime_rays_rgb[idx]  # [2+1, 3*?]
-        flag = self.flags[idx]
+        flag = self.runtime_flags[idx]
         return sample, flag
         # rays, target = sample[:2], sample[2]
         # return rays, target, flag
 
     @staticmethod
-    def force_shuffle(rays_rgb, return_idx=False):
+    def force_shuffle(*toshuffle_Tensors):
 
-        rand_idx = torch.randperm(rays_rgb.shape[0])
-        rays_rgb = rays_rgb[rand_idx]
-        if return_idx:
-            return rays_rgb, rand_idx
-        return rays_rgb
+        rand_idx = torch.randperm(toshuffle_Tensors[0].shape[0])
+        shuffled_Tensors = []
+
+        for Tensor in toshuffle_Tensors:
+            shuffled_Tensors.append(Tensor[rand_idx])
+
+        return shuffled_Tensors
+
     # dynamically update data, add data(img, pose) from inversion
     def incremental_update_data(self, incremental_path, update_runtime=True):
         # search for incremental data to be added
@@ -102,22 +105,20 @@ class Incremental_dataset(Dataset):
 
         incremental_rays_rgb = self.build_rays_rgb(incremental_imgs,
                                                    incremental_poses)
+
+        incremental_flags = torch.ones(incremental_rays_rgb.shape[:-1]).long()
+
+        # needs ablation study
         if update_runtime:
             self.runtime_rays_rgb = torch.cat(
                 [self.runtime_rays_rgb, incremental_rays_rgb])
+            self.runtime_flags = torch.cat([self.runtime_flags, incremental_flags])
 
-        return incremental_rays_rgb
+            self.runtime_rays_rgb, self.runtime_flags = self.force_shuffle(self.runtime_rays_rgb, self.runtime_flags)
 
-        # needs ablation study
+        return incremental_rays_rgb, incremental_flags
 
-        # self.imgs = torch.cat([self.imgs, incremental_imgs], 0)
-        # self.poses = torch.cat([self.poses, incremental_poses])
 
-        # concat new incremental-imgs
-
-        # new_flags = torch.ones((incremental_imgs.shape[0],
-        #                         *self.rays_rgb.shape[1:-1]))  # maintain shape
-        # self.flags = torch.cat([self.flags, new_flags])
 
 
 def create_dataset(args):

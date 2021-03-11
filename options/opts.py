@@ -515,9 +515,10 @@ def prepare_proj_parser(parser):
         help="duration of the learning rate decay",
     )
     parser.add_argument("--lr", type=float, default=0.1, help="learning rate")
+    parser.add_argument("--w_gt", type=float, default=1., help="NeRF GT weights")
     parser.add_argument("--noise",
                         type=float,
-                        default=0.05,
+                        default=0.03,
                         help="strength of the noise level")
     parser.add_argument(
         "--noise_ramp",
@@ -570,7 +571,7 @@ def add_proj_parser(parser):
         default=4,
         help="injection starts from which layer in W",
     )
-    parser.add_argument("--proj_latent",
+    parser.add_argument("--stage0_path",
                         type=str,
                         default=None,
                         help="path to the projected latent code")
@@ -610,5 +611,11 @@ def add_proj_parser(parser):
         type=int,
         default=10000,
         help="frequency of console printout and metric loggin",
+    )
+    parser.add_argument(
+        "--stage0_basepath",
+        type=str,
+        default=None,
+        help="path to stage0"
     )
     return parser

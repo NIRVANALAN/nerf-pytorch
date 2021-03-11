@@ -66,7 +66,7 @@ def main():
     os.makedirs(os.path.join(basedir, expname), exist_ok=True)
 
     # copy train_imgs for first projection
-    train_img_dir = exp_basedir / 'train_img'
+    train_img_dir = exp_basedir / 'stage0'
     train_img_dir.mkdir(exist_ok=True)
     for i in range(train_imgs.shape[0]):
         img = train_imgs[i].cpu().numpy()
@@ -149,53 +149,41 @@ def main():
         i_batch = 0
 
     print("TEST views number: {}".format(test_imgs.shape[0]))
-    psnr_savedir = os.path.join(basedir, expname, 'psnr')
+    psnr_savedir = os.path.join(basedir, expname, 'psnr_vis')
 
     os.makedirs(psnr_savedir, exist_ok=True)
 
-    if start != args.epoch - 1:  # ease of use in test
-        start += 1
+    start_stage = (start+1) // args.cotraining_epoch
 
-    # inversion
-    stage_exp_dir = project(args, exp_basedir=exp_basedir, stage=0)
+    # cotraining start
+    # stage 0 -> initialize NeRF, Inversion Code 
+    # stage>0: incrementally add data
+    for stage in range(start_stage, args.cotraining_stage + 1):
 
-    # init dataloader
-    train_dataloader = DataLoader(incremental_dataset,
-                                  batch_size=N_rand,
-                                  shuffle=True,
-                                  num_workers=0,
-                                  drop_last=True)
+        # inversion 
+        stage_exp_dir = project(args, exp_basedir, stage)
 
-    for stage in range(1, args.cotraining_stage):
-        print('stage: {}'.format(stage))
+        if stage > 0:
+            # add incremental samples
+            incremental_dataset.incremental_update_data(stage_exp_dir)
 
-        for i in trange(start, args.cotraining_epoch):
+        # rebuild dataloader
+        print('stage: {}, incremental_dataset size: {}'.format(stage, len(incremental_dataset)))
+        train_dataloader = DataLoader(incremental_dataset,
+                                    batch_size=N_rand,
+                                    shuffle=True,
+                                    num_workers=0,
+                                    drop_last=True)
+        # NeRF training
+        for i in trange(0, args.cotraining_epoch):
 
             # Sample random ray batch
             if use_batching:  # by default
-                # Random over all images
                 batch = next(iter(train_dataloader))
 
-                batch, _ = map(todevice, batch)
+                batch, batch_flags = map(todevice, batch)
                 batch = torch.transpose(batch, 0, 1)  # 2 * BS * 3
                 batch_rays, target_s = batch[:2], batch[2]
-                '''
-                # Random over all images
-                batch = rays_rgb[i_batch:i_batch + N_rand]  # [B, 2+1, 3*?]
-                batch = torch.transpose(batch, 0, 1)  # [2+1, B, 3]
-                # batch_incremental_flag = incremental_flags[i_batch:i_batch +
-                #                                            N_rand]
-                batch_rays, target_s = batch[:2], batch[2]
-
-                i_batch += N_rand
-                if i_batch >= rays_rgb.shape[0]:
-                    # print("Shuffle data after an epoch!")
-                    rand_idx = torch.randperm(rays_rgb.shape[0])
-                    rays_rgb = rays_rgb[rand_idx]
-                    incremental_flags = incremental_flags[rand_idx]
-
-                    i_batch = 0
-                '''
 
             #####  Core optimization loop  #####
             rgb, disp, acc, extras = render(
@@ -211,11 +199,11 @@ def main():
 
             optimizer.zero_grad()
 
-            if args.incremental_path != None:
-                pass
-                # img_loss = img2mse(rgb, target_s, keepdim=True)
-                # img_loss = (img_loss * batch_incremental_flag).mean() + (
-                #     img_loss * (1 - batch_incremental_flag)).mean() * args.w_gt
+            # higher weight for original GT samples
+            if args.w_gt != 1:
+                img_loss = img2mse(rgb, target_s, keepdim=True)
+                img_loss = (img_loss * batch_flags).mean() + (
+                    img_loss * (1 - batch_flags)).mean() * args.w_gt
             else:
                 img_loss = img2mse(rgb, target_s)
 
@@ -248,8 +236,7 @@ def main():
             global_step += 1
 
         #### TEST ####
-        testsavedir = os.path.join(basedir, expname,
-                                   "testset_{:02d}".format(stage))
+        testsavedir = stage_exp_dir / "testset".format(stage)
         os.makedirs(testsavedir, exist_ok=True)
         print("test poses shape", test_poses.shape)
         # encode on test_set
@@ -262,20 +249,16 @@ def main():
             savedir=testsavedir,
         )
 
-        img_loss = img2mse(rgbs, test_imgs[::args.test_interv], keepdims=True)
+        img_loss = img2mse(rgbs, test_imgs[::args.test_interv], test=True)
         psnr = mse2psnr(img_loss).cpu().numpy()
-        np.save(
-            os.path.join(basedir, expname,
-                         "test_psnr_stage_{:02d}".format(stage)),
-            psnr,
-        )
+        np.save(stage_exp_dir / 'test_psnr.npy', psnr)
+
         # TODO
-        # psnr_baseline = np.load(
-        #     'logs/PIXNERF/9views_viewdirs_raw__id0_instance_1_srn_car_traintest_resnet_6_0_viewasinput/test_psnr_epoch_010001.npy'
-        # )
-        # plt.plot(list(range(psnr_baseline.shape[0])), psnr_baseline)[0]
+        if stage>0:
+            psnr_baseline = np.load(exp_basedir / 'stage0' /  f"test_psnr.npy")
+            plt.plot(list(range(psnr_baseline.shape[0])), psnr_baseline)[0]
         plt.plot(list(range(psnr.shape[0])), psnr)[0]
-        plt.savefig(os.path.join(psnr_savedir, f"iter_{i}.png"))
+        plt.savefig(os.path.join(psnr_savedir, f"stage_{stage}.png"))
         plt.clf()
 
         log = f"[TEST] Iter: {i} Loss: {img_loss.mean().item()}  PSNR: {psnr.mean()}\n"
@@ -294,6 +277,8 @@ def main():
         path = os.path.join(basedir, expname, "stage_{:02d}.tar".format(stage))
         torch.save(
             {
+                'stage':
+                stage,
                 "global_step":
                 global_step,
                 "network_fn_state_dict":
@@ -310,30 +295,11 @@ def main():
         # save video
         rgbs, disps = map(lambda x: x.cpu().numpy(), (rgbs, disps))
         print("Done, saving", rgbs.shape, disps.shape)
-        moviebase = exp_basedir / "spiral_{:06d}_".format(i)
+        moviebase = stage_exp_dir / "spiral_{:06d}_".format(global_step)
         imageio.mimwrite(str(moviebase) + "rgb.mp4",
                          to8b(rgbs),
                          fps=10,
                          quality=8)
-
-        # inversion and rebuild
-        stage_exp_dir = project(args, exp_basedir=exp_basedir, stage=stage)
-
-        # add incremental samples
-        incremental_rays_rgb = incremental_dataset.incremental_update_data(
-            stage_exp_dir)
-        rays_rgb = torch.cat([rays_rgb, incremental_rays_rgb])
-
-        # rebuild dataset
-        train_dataloader = DataLoader(incremental_dataset,
-                                      batch_size=N_rand,
-                                      shuffle=True,
-                                      num_workers=0,
-                                      drop_last=True)
-
-        # shuffle
-        perm_randidx = torch.randperm(rays_rgb.size(0))
-        rays_rgb = rays_rgb[perm_randidx]
 
     writer.close()
 
